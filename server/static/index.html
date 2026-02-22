@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TPF2 Echtzeit-Fahrplan</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- ── Header ─────────────────────────────────────────────────── -->
+  <header>
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">🚆</span>
+        <div>
+          <span class="logo-title">Transport Fever 2</span>
+          <span class="logo-sub">Echtzeit-Fahrplan</span>
+        </div>
+      </div>
+      <div class="status-bar">
+        <div class="status-badge" id="conn-badge">
+          <span class="dot" id="conn-dot"></span>
+          <span id="conn-label">Verbinde…</span>
+        </div>
+        <div class="gametime" id="game-time-box" title="Spielzeit">🕐 –</div>
+        <div class="last-update" id="last-update-box">–</div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Stat-Karten ───────────────────────────────────────────── -->
+  <section class="stats-row" id="stats-row">
+    <div class="stat-card" id="sc-vehicles">
+      <div class="sc-value" id="sv-vehicles">–</div>
+      <div class="sc-label">Fahrzeuge</div>
+    </div>
+    <div class="stat-card" id="sc-passengers">
+      <div class="sc-value" id="sv-passengers">–</div>
+      <div class="sc-label">Passagiere gesamt</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-value" id="sv-lines">–</div>
+      <div class="sc-label">Linien</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-value" id="sv-stations">–</div>
+      <div class="sc-label">Stationen</div>
+    </div>
+  </section>
+
+  <!-- ── Filter & Suche ───────────────────────────────────────── -->
+  <section class="filter-bar">
+    <input type="text" id="search-input" placeholder="🔍  Fahrzeug / Linie / Station suchen…" />
+    <div class="filter-pills" id="type-filter">
+      <button class="pill active" data-type="ALL">Alle</button>
+      <button class="pill" data-type="RAIL">🚆 Zug</button>
+      <button class="pill" data-type="ROAD">🚌 Bus</button>
+      <button class="pill" data-type="TRAM">🚋 Tram</button>
+      <button class="pill" data-type="WATER">⛴ Schiff</button>
+      <button class="pill" data-type="AIR">✈ Flugzeug</button>
+    </div>
+    <select id="sort-select">
+      <option value="name">Sortierung: Name (Fahrzeug)</option>
+      <option value="speed">Sortierung: Geschwindigkeit</option>
+      <option value="passengers">Sortierung: Passagiere</option>
+      <option value="type">Sortierung: Typ</option>
+      <option value="state">Sortierung: Zustand</option>
+      <option value="last_stop">Sortierung: Letzter Halt</option>
+      <option value="next_stop">Sortierung: Nächster Halt</option>
+      <option value="occupancy">Sortierung: Auslastung</option>
+      <option value="line">Sortierung: Linie</option>
+    </select>
+  </section>
+
+  <!-- ── Fahrzeugtabelle ───────────────────────────────────────── -->
+  <main>
+    <div class="table-wrapper">
+      <table id="vehicle-table">
+        <thead>
+          <tr>
+            <th data-filter-key="name" data-filter-label="Fahrzeug">Fahrzeug</th>
+            <th data-filter-key="type" data-filter-label="Typ">Typ</th>
+            <th data-filter-key="line_name" data-filter-label="Linie">Linie</th>
+            <th data-filter-key="state" data-filter-label="Zustand">Zustand</th>
+            <th>Geschw.</th>
+            <th data-filter-key="last_stop_name" data-filter-label="Letzter Halt">Letzter Halt</th>
+            <th data-filter-key="next_stop_name" data-filter-label="Nächster Halt">Nächster Halt</th>
+            <th>
+              <span title="Passagiere / Kapazität">Pax</span>
+            </th>
+            <th>Auslastung</th>
+          </tr>
+          <tr class="col-filter-row">
+            <th><input class="col-filter-input" data-filter-key="name" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="type" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="line_name" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="state" placeholder="Filter…" /></th>
+            <th></th>
+            <th><input class="col-filter-input" data-filter-key="last_stop_name" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="next_stop_name" placeholder="Filter…" /></th>
+            <th></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="vehicle-tbody">
+          <tr><td colspan="9" class="empty-row">Warte auf Daten…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ── Detail-Panel (rechts ausklappen bei Klick) ─────────── -->
+    <div id="detail-panel" class="detail-panel hidden">
+      <button id="detail-close" title="Schließen">✕</button>
+      <h2 id="dp-name">–</h2>
+      <div class="dp-grid" id="dp-grid"></div>
+    </div>
+  </main>
+
+  <!-- ── Footer ────────────────────────────────────────────────── -->
+  <footer>
+    TPF2 Echtzeit-Telemetrie &nbsp;·&nbsp;
+    <a href="/docs" target="_blank">API-Docs</a> &nbsp;·&nbsp;
+    <a href="/api/telemetry" target="_blank">Raw JSON</a>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
