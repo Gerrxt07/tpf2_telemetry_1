@@ -48,7 +48,7 @@ mod.lua                             server/server.py (FastAPI)
 ## Data snapshot (telemetry.json)
 The collector currently writes:
 - `schema_version`: 2  
-- `write_count`: monotonically increasing counter (TPF2 sandbox lacks a wall-clock API; this supplements `game_time` when present)  
+- `write_count`: increments with every write so you can detect new snapshots even when no wall-clock time is available or `game_time` is unchanged  
 - `game_time`: current game time (from `game.interface` when available)  
 - `stats`: totals for vehicles, passengers, lines, stations, and vehicle counts by type  
 - `vehicles`: per-vehicle state (id, name, type, speed m/s & km/h, passengers/capacity, cargo, line id/name, last & next stop ids/names, position, direction, state)  
@@ -59,7 +59,7 @@ The collector currently writes:
 
 ## Current optimizations and easy update ideas (no big features)
 - The collector already throttles writes via an in-game call counter and rebuilds station caches per snapshot to avoid stale data.
-- Settings UI exposes interval/cargo/bus toggles; wiring those settings directly into `telemetry_runtime.lua` would let players tune performance without edits.
+- Settings UI already exposes interval/cargo/bus toggles; a small follow-up would pass those values into `telemetry_runtime.lua` so players can tune performance without editing files.
 - Logging is concise (`[TPF2-Telemetry]`); keeping the interval >1s minimizes file writes on slower disks.
 - If desired, a small guard could skip writes when no vehicles are returned, further reducing churn on empty saves.
 
