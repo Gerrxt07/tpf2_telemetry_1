@@ -1,161 +1,79 @@
-# TPF2 Echtzeit-Fahrplan-Web-Interface
+# Transport Fever 2 – Real-Time Telemetry
 
-Zeigt in Echtzeit, wo sich alle Züge (und optional Busse/Schiffe) in deiner
-Transport Fever 2-Welt befinden – Geschwindigkeit, Passagiere, letzte/nächste
-Station und mehr. Live im Browser via WebSocket.
+This mod writes live vehicle, line, and station data from your Transport Fever 2 world into a `telemetry.json` file. An optional FastAPI server watches that file and streams updates to a browser dashboard via WebSocket.
 
----
+## What the mod does
+- Collects every vehicle’s position, speed, passenger/cargo load, current line, last/next stop, and direction.
+- Captures all lines (with stop metadata) and station positions for mapping.
+- Emits lightweight stats (vehicle counts by type, passenger totals, line/station totals).
+- Writes everything to `telemetry.json` inside the mod folder on a short interval so external tools can visualize or analyze it.
+- Optional companion server (`server/server.py`) serves a web UI and a WebSocket feed that pushes new snapshots immediately to the browser.
 
-## Architektur
-
+### How it works (at a glance)
 ```
-TPF2 (Spiel)                       Browser
-────────────                       ───────
-mod.lua                             index.html
-  └── telemetry/                      └── app.js (WebSocket)
-        collector.lua                       │
-              │  schreibt alle ~3s          │  Live-Updates
-              ▼                             │
-        telemetry.json  ──►  server.py  ────┘
-        (im Mod-Ordner)     (FastAPI +
-                             Watchdog)
+TPF2 (Mod)                          Optional Dashboard
+───────────                        ───────────────────
+mod.lua                             server/server.py (FastAPI)
+  └─ res/scripts/telemetry/           └─ watches telemetry.json
+        collector.lua                     └─ /ws streams to browser
+           ⇣ writes telemetry.json            (static/index.html)
 ```
 
-### Komponenten
+## Installation
+1) **Enable the mod in TPF2**
+   - Place the folder `tpf2_telemetry_1` in `Steam/userdata/.../1066780/local/mods/`.
+   - In-game, open **Manage Mods** and enable **“Real-Time Telemetry”**.
+   - Load a save; the mod will start writing `telemetry.json` into its own directory.
 
-| Datei | Beschreibung |
-|-------|-------------|
-| `mod.lua` | TPF2-Mod-Definition; lädt den Collector und registriert ihn |
-| `strings.lua` | Lokalisierung (DE/EN) |
-| `res/scripts/telemetry/collector.lua` | Sammelt Fahrzeug-, Linien- und Stationsdaten; schreibt `telemetry.json` |
-| `server/server.py` | FastAPI + Watchdog-Server; überwacht `telemetry.json` und pusht Änderungen per WebSocket |
-| `server/static/index.html` | Web-UI |
-| `server/static/style.css` | Styling (Dark Mode) |
-| `server/static/app.js` | Frontend-Logik (WebSocket, Rendering, Filter) |
+2) **(Optional) Start the dashboard server**
+   ```bash
+   cd server
+   pip install -r requirements.txt
+   python server.py
+   ```
+   - Default: http://127.0.0.1:8765  
+   - Override host/port: `TPF2_HOST=0.0.0.0 TPF2_PORT=9000 python server.py`  
+   - Custom telemetry path: `TPF2_TELEMETRY_PATH="C:/path/to/telemetry.json" python server.py`
 
----
+3) **Open the dashboard**  
+   Visit **http://localhost:8765** to see the live map/list once data is present.
 
-## Installation & Start
+## Configuration (mod parameters)
+- **Write interval (seconds):** `1, 2, 3, 5, 10, 15, 30` (default 2s in the runtime script).
+- **Include cargo vehicles:** on/off.
+- **Include buses/trams:** on/off.
 
-### 1. Mod in TPF2 aktivieren
+> Tip: Lower intervals increase disk writes and CPU usage; pick a value that fits your hardware and map size.
 
-1. Der Mod-Ordner `tpf2_telemetry_1` liegt bereits im richtigen Verzeichnis
-   (`Steam/userdata/.../1066780/local/mods/`).
-2. Starte TPF2, gehe zu **Mods verwalten** und aktiviere **„Echtzeit-Telemetrie"**.
-3. Lade eine Welt. Der Mod schreibt sofort `telemetry.json` in seinen Ordner.
+## Data snapshot (telemetry.json)
+The collector currently writes:
+- `schema_version`: 2  
+- `write_count`: monotonically increasing counter (used instead of real wall-clock time)  
+- `game_time`: current game time (from `game.interface` when available)  
+- `stats`: totals for vehicles, passengers, lines, stations, and vehicle counts by type  
+- `vehicles`: per-vehicle state (id, name, type, speed m/s & km/h, passengers/capacity, cargo, line id/name, last & next stop ids/names, position, direction, state)  
+- `lines`: id, name, stop list (with resolved station/terminal info where possible)  
+- `stations`: id, name, position  
 
-> **Hinweis**: Falls `game.interface.setUpdateCallback` in deiner TPF2-Version
-> nicht verfügbar ist, werden Daten nur bei Fahrzeugereignissen (Ankunft/Abfahrt)
-> und beim Laden aktualisiert. Für echte Sekunden-Updates ist CommonAPI2 empfohlen.
+`server.py` watches the file, keeps the latest snapshot in memory, exposes REST endpoints (`/api/telemetry`, `/api/vehicles`, `/api/lines`, `/api/stations`, `/api/stats`, `/api/health`) and a WebSocket feed at `/ws`.
 
-### 2. Python-Server starten
+## Current optimizations and easy update ideas (no big features)
+- The collector already throttles writes via an in-game call counter and rebuilds station caches per snapshot to avoid stale data.
+- Settings UI exposes interval/cargo/bus toggles; wiring those settings directly into `telemetry_runtime.lua` would let players tune performance without edits.
+- Logging is concise (`[TPF2-Telemetry]`); keeping the interval >1s minimizes file writes on slower disks.
+- If desired, a small guard could skip writes when no vehicles are returned, further reducing churn on empty saves.
 
-```bash
-cd server
-pip install -r requirements.txt
-python server.py
-```
-
-Der Server startet standardmäßig auf **http://127.0.0.1:8765**.
-
-#### Optionale Parameter
-
-```bash
-# Anderen Port nutzen
-TPF2_PORT=9000 python server.py
-
-# Anderen Host (Netzwerk-Zugriff)
-TPF2_HOST=0.0.0.0 python server.py
-
-# Expliziten Pfad zur telemetry.json angeben
-python server.py "C:/Pfad/zur/telemetry.json"
-
-# Oder als Umgebungsvariable
-TPF2_TELEMETRY_PATH="C:/Pfad/zur/telemetry.json" python server.py
-```
-
-### 3. Browser öffnen
-
-**http://localhost:8765**
-
----
-
-## JSON-Schema (telemetry.json)
-
-```jsonc
-{
-  "schema_version": 2,
-  "timestamp": 1708615200,        // Unix-Zeit (Echtzeit)
-  "game_time": { ... },           // Spielzeit-Objekt (TPF2-abhängig)
-  "stats": {
-    "total_vehicles": 42,
-    "total_passengers": 8300,
-    "total_lines": 15,
-    "total_stations": 30,
-    "vehicles_by_type": { "RAIL": 20, "ROAD": 22 }
-  },
-  "vehicles": [
-    {
-      "id": 12345,
-      "name": "ICE 1",
-      "type": "RAIL",              // RAIL | ROAD | WATER | AIR | UNKNOWN
-      "state": "IN_TRANSIT",       // IN_TRANSIT | AT_TERMINAL | STOPPED
-      "line_id": 67890,
-      "line_name": "Linie 1",
-      "position": { "x": 1234.5, "y": 567.8, "z": 0.0 },
-      "speed_ms": 69.44,           // m/s
-      "speed_kmh": 250.0,
-      "direction": 1,              // 1 = vorwärts, -1 = rückwärts
-      "passengers": 450,
-      "capacity": 500,
-      "cargo": 0,
-      "cargo_capacity": 0,
-      "last_stop_id": 11111,
-      "last_stop_name": "Berlin Hbf",
-      "next_stop_id": 22222,
-      "next_stop_name": "Hamburg Hbf"
-    }
-  ],
-  "lines": [ { "id": ..., "name": ..., "stops": [...] } ],
-  "stations": [ { "id": ..., "name": ..., "pos": { "x":..., "y":..., "z":... } } ]
-}
-```
-
----
-
-## API-Endpunkte
-
-| Methode | URL | Beschreibung |
-|---------|-----|-------------|
-| `GET` | `/` | Web-UI |
-| `GET` | `/api/telemetry` | Vollständiger Snapshot |
-| `GET` | `/api/vehicles` | Nur Fahrzeugliste |
-| `GET` | `/api/lines` | Nur Linien |
-| `GET` | `/api/stations` | Nur Stationen |
-| `GET` | `/api/stats` | Statistiken |
-| `GET` | `/api/health` | Status-Check |
-| `GET` | `/docs` | OpenAPI-Dokumentation |
-| `WS`  | `/ws` | WebSocket Live-Feed |
-
----
+## Future feature ideas
+- **Map overlay:** Bundle the dashboard with a simple background map/tiles for vehicle positions.
+- **Historical trends:** Optional rolling buffer of snapshots (in-memory or rotating files) for charts.
+- **Filtering/presets:** Allow filtering by vehicle type or line directly in the Web UI.
+- **Multi-save support:** Let the server watch multiple telemetry files and switch between them.
+- **Localized UI:** Add language toggles in the dashboard matching the mod’s DE/EN strings.
 
 ## Troubleshooting
+- **`telemetry.json` not created:** Ensure the mod is enabled and the game can write to its mod folder; check in-game console for `[TPF2-Telemetry]` messages.
+- **Server not starting:** Re-run `pip install -r requirements.txt`; if port 8765 is busy, set `TPF2_PORT=9000`.
+- **Data feels stale:** Very low intervals require `game.interface.setUpdateCallback`; otherwise updates happen on ticks/events. CommonAPI2 can help fire events more often.
 
-### `telemetry.json` wird nicht erstellt
-- Stelle sicher, dass der Mod in TPF2 aktiviert ist.
-- Prüfe die TPF2-Konsole auf Fehlermeldungen (`[TPF2-Telemetry]`-Präfix).
-- Der Mod benötigt Schreibrechte auf sein eigenes Verzeichnis.
-
-### Server startet nicht
-- `pip install -r requirements.txt` erneut ausführen.
-- Port 8765 belegt? `TPF2_PORT=9000 python server.py`
-
-### Daten veralten (werden nicht aktualisiert)
-- Prüfe, ob der Mod `game.interface.setUpdateCallback` unterstützt.
-- Als Fallback: CommonAPI2 installieren und aktivieren – dann werden Events gefeuert.
-- Oder: Server manuell neuladen via `GET /api/health`.
-
----
-
-## Lizenz
-MIT – Frei verwendbar und modifizierbar.
+## License
+MIT – free to use and modify.
