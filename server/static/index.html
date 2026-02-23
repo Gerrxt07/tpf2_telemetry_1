@@ -4,14 +4,104 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TPF2 Real-Time Telemetry</title>
+
   <!-- Tailwind CSS Play CDN -->
-  <script>tailwind={config:{darkMode:"class"}}</script>
+  <script>
+    tailwind = {
+      config: {
+        darkMode: "class",
+        safelist: [
+          "translate-x-4","translate-x-0","opacity-0","opacity-100",
+          "scale-95","scale-100","animate-pulse","transition",
+          "ease-out","ease-in","duration-200","duration-150"
+        ]
+      }
+    }
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
+
   <!-- Lucide Icons (UMD) -->
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+
+  <!-- HTMX – REST polling fallback (no JS required) -->
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+
+  <!-- Alpine.js store – must be defined BEFORE Alpine loads -->
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.store('app', {
+        // ── Telemetry ─────────────────────────────────────────
+        stats:        {},
+        gameTime:     null,
+        lastUpdated:  '–',
+
+        // ── UI state ──────────────────────────────────────────
+        connState:    'connecting',   // connecting | connected | disconnected
+        detailVisible: false,
+        filterType:   'ALL',
+        sortKey:      'name',
+        searchQuery:  '',
+
+        // ── Preferences (persisted to localStorage) ───────────
+        lang:     localStorage.getItem('tpf2_lang')   || 'de',
+        darkMode: localStorage.getItem('tpf2_theme') !== 'light',
+
+        // ── Lifecycle ─────────────────────────────────────────
+        init() {
+          // Apply saved theme on Alpine init (runs before first paint)
+          document.documentElement.classList.toggle('dark', this.darkMode);
+        },
+
+        // ── Actions called from Alpine HTML ───────────────────
+        setFilter(type) {
+          this.filterType = type;
+          window.tpf2Render?.();
+        },
+        setSortKey(key) {
+          this.sortKey = key;
+          window.tpf2Render?.();
+        },
+        setSearch(q) {
+          this.searchQuery = q;
+          window.tpf2Render?.();
+        },
+        toggleTheme() {
+          this.darkMode = !this.darkMode;
+          localStorage.setItem('tpf2_theme', this.darkMode ? 'dark' : 'light');
+          document.documentElement.classList.toggle('dark', this.darkMode);
+        },
+        toggleLang() {
+          window.tpf2ToggleLang?.();
+        },
+        closeDetail() {
+          window.tpf2CloseDetail?.();
+        },
+      });
+    });
+  </script>
+
+  <!-- Alpine.js CDN (defer so inline script above runs first) -->
+  <script defer src="https://unpkg.com/alpinejs@3.14.8/dist/cdn.min.js"></script>
+
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body class="bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen antialiased">
+
+<body x-data class="bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen antialiased">
+
+  <!--
+    HTMX polling shim (hidden):
+    • fires on page load (initial REST fetch – fallback before WS connects)
+    • fires every 5 s ONLY while WS is disconnected
+    • hx-swap="none" → no DOM swap; JavaScript handler (tpf2HandleHtmx)
+      processes the JSON response
+  -->
+  <div
+    hx-get="/api/telemetry"
+    hx-trigger="load, every 5s"
+    hx-swap="none"
+    hx-on::after-request="window.tpf2HandleHtmx && window.tpf2HandleHtmx(event)"
+    class="hidden">
+  </div>
 
   <!-- ── Header ──────────────────────────────────────────────────────── -->
   <header class="sticky top-0 z-50 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md">
@@ -30,28 +120,64 @@
 
       <!-- Right side controls -->
       <div class="flex items-center gap-2">
-        <!-- Game time (shown by JS when data arrives) -->
-        <div class="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400" id="game-time-box" style="display:none">
+
+        <!-- Game time – Alpine x-show + x-transition replaces style="display:none" -->
+        <div
+          x-show="$store.app.gameTime"
+          x-transition:enter="transition ease-out duration-200"
+          x-transition:enter-start="opacity-0 scale-95"
+          x-transition:enter-end="opacity-100 scale-100"
+          class="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
           <i data-lucide="calendar" class="w-3.5 h-3.5 shrink-0"></i>
-          <span id="game-time-text">–</span>
+          <span x-text="$store.app.gameTime ?? '–'"></span>
         </div>
-        <!-- Last update -->
-        <div class="hidden md:flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400" id="last-update-box">
+
+        <!-- Last update – Alpine x-text replaces getElementById + textContent -->
+        <div class="hidden md:flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
           <i data-lucide="clock" class="w-3.5 h-3.5 shrink-0"></i>
-          <span id="last-update-text">–</span>
+          <span x-text="$store.app.lastUpdated"></span>
         </div>
-        <!-- Connection badge -->
-        <div id="conn-badge" class="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-200 dark:border-slate-700 text-xs bg-white dark:bg-slate-900">
-          <span id="conn-dot" class="w-1.5 h-1.5 rounded-full"></span>
-          <span id="conn-label" data-i18n="connecting">Connecting…</span>
+
+        <!--
+          Connection badge – Alpine :class replaces manual DOM class manipulation.
+          Border and dot colour change reactively based on $store.app.connState.
+        -->
+        <div
+          class="flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs bg-white dark:bg-slate-900 transition-colors duration-300"
+          :class="{
+            'border-emerald-300 dark:border-emerald-700': $store.app.connState === 'connected',
+            'border-amber-300   dark:border-amber-700':   $store.app.connState === 'connecting',
+            'border-red-300     dark:border-red-700':     $store.app.connState === 'disconnected',
+            'border-slate-200   dark:border-slate-700':   !$store.app.connState
+          }">
+          <span
+            class="w-1.5 h-1.5 rounded-full transition-colors duration-300"
+            :class="{
+              'bg-emerald-500 shadow-[0_0_0_3px_rgba(34,197,94,.2)]': $store.app.connState === 'connected',
+              'bg-amber-400 animate-pulse':                            $store.app.connState === 'connecting',
+              'bg-red-500':                                            $store.app.connState === 'disconnected',
+              'bg-slate-400':                                          !$store.app.connState
+            }">
+          </span>
+          <!-- x-text reads from i18n via a lookup object so no app.js ref needed -->
+          <span
+            id="conn-label"
+            class="text-slate-600 dark:text-slate-400"
+            data-i18n="connecting">Connecting…</span>
         </div>
-        <!-- Language toggle -->
-        <button id="lang-toggle"
+
+        <!-- Language toggle – Alpine @click + x-text -->
+        <button
+          @click="$store.app.toggleLang()"
           class="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+          x-text="$store.app.lang.toUpperCase()"
           title="Switch language">DE</button>
-        <!-- Theme toggle -->
-        <button id="theme-toggle"
+
+        <!-- Theme toggle – Alpine @click + x-text -->
+        <button
+          @click="$store.app.toggleTheme()"
           class="p-1.5 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-base leading-none"
+          x-text="$store.app.darkMode ? '☀️' : '🌙'"
           title="Toggle theme">☀️</button>
       </div>
     </div>
@@ -59,13 +185,16 @@
 
   <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-5 space-y-4">
 
-    <!-- ── Stats ──────────────────────────────────────────────────────── -->
+    <!-- ── Stats – Alpine x-text replaces getElementById + textContent ── -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" id="stats-row">
 
       <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-blue-400/60 dark:hover:border-blue-500/50 transition-colors duration-200 cursor-default">
         <div>
-          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-vehicles">–</div>
-          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="vehicles">Vehicles</div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none"
+               x-text="$store.app.stats.total_vehicles ?? '–'"
+               id="sv-vehicles">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium"
+               data-i18n="vehicles">Vehicles</div>
         </div>
         <div class="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors shrink-0">
           <i data-lucide="train-front" class="w-5 h-5 text-blue-500"></i>
@@ -74,8 +203,11 @@
 
       <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-emerald-400/60 dark:hover:border-emerald-500/50 transition-colors duration-200 cursor-default">
         <div>
-          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-passengers">–</div>
-          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="passengers">Passengers</div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none"
+               x-text="$store.app.stats.total_passengers ?? '–'"
+               id="sv-passengers">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium"
+               data-i18n="passengers">Passengers</div>
         </div>
         <div class="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center group-hover:bg-emerald-500/20 transition-colors shrink-0">
           <i data-lucide="users" class="w-5 h-5 text-emerald-500"></i>
@@ -84,8 +216,11 @@
 
       <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-violet-400/60 dark:hover:border-violet-500/50 transition-colors duration-200 cursor-default">
         <div>
-          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-lines">–</div>
-          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="lines">Lines</div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none"
+               x-text="$store.app.stats.total_lines ?? '–'"
+               id="sv-lines">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium"
+               data-i18n="lines">Lines</div>
         </div>
         <div class="w-10 h-10 rounded-xl bg-violet-500/10 flex items-center justify-center group-hover:bg-violet-500/20 transition-colors shrink-0">
           <i data-lucide="route" class="w-5 h-5 text-violet-500"></i>
@@ -94,8 +229,11 @@
 
       <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-amber-400/60 dark:hover:border-amber-500/50 transition-colors duration-200 cursor-default">
         <div>
-          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-stations">–</div>
-          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="stations">Stations</div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none"
+               x-text="$store.app.stats.total_stations ?? '–'"
+               id="sv-stations">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium"
+               data-i18n="stations">Stations</div>
         </div>
         <div class="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20 transition-colors shrink-0">
           <i data-lucide="map-pin" class="w-5 h-5 text-amber-500"></i>
@@ -105,24 +243,56 @@
 
     <!-- ── Filter bar ─────────────────────────────────────────────────── -->
     <div class="flex flex-wrap items-center gap-2.5">
-      <!-- Global search -->
+
+      <!-- Global search – Alpine @input feeds store + re-render -->
       <div class="relative flex-1 min-w-[180px]">
         <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500 pointer-events-none"></i>
         <input type="text" id="search-input"
+          @input="$store.app.setSearch($el.value)"
           class="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400 dark:focus:border-blue-500 transition-all"
           placeholder="Search…" data-i18n-placeholder="searchPlaceholder" />
       </div>
-      <!-- Type pills -->
+
+      <!--
+        Type pills – Alpine :class drives active state reactively.
+        @click calls store.setFilter() → updates filterType → re-renders table.
+        data-i18n labels are still updated by applyI18n() in app.js.
+      -->
       <div class="flex items-center gap-1.5 flex-wrap" id="type-filter">
-        <button class="pill active text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="ALL" data-i18n="all">All</button>
-        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="RAIL" data-i18n="train">🚆 Train</button>
-        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="ROAD" data-i18n="bus">🚌 Bus</button>
-        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="TRAM" data-i18n="tram">🚋 Tram</button>
-        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="WATER" data-i18n="ship">⛴ Ship</button>
-        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="AIR" data-i18n="plane">✈ Plane</button>
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+          :class="{ active: $store.app.filterType === 'ALL' }"
+          @click="$store.app.setFilter('ALL')"
+          data-type="ALL" data-i18n="all">All</button>
+
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+          :class="{ active: $store.app.filterType === 'RAIL' }"
+          @click="$store.app.setFilter('RAIL')"
+          data-type="RAIL" data-i18n="train">🚆 Train</button>
+
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+          :class="{ active: $store.app.filterType === 'ROAD' }"
+          @click="$store.app.setFilter('ROAD')"
+          data-type="ROAD" data-i18n="bus">🚌 Bus</button>
+
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+          :class="{ active: $store.app.filterType === 'TRAM' }"
+          @click="$store.app.setFilter('TRAM')"
+          data-type="TRAM" data-i18n="tram">🚋 Tram</button>
+
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+          :class="{ active: $store.app.filterType === 'WATER' }"
+          @click="$store.app.setFilter('WATER')"
+          data-type="WATER" data-i18n="ship">⛴ Ship</button>
+
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all"
+          :class="{ active: $store.app.filterType === 'AIR' }"
+          @click="$store.app.setFilter('AIR')"
+          data-type="AIR" data-i18n="plane">✈ Plane</button>
       </div>
-      <!-- Sort select -->
+
+      <!-- Sort select – Alpine @change feeds store.setSortKey() -->
       <select id="sort-select"
+        @change="$store.app.setSortKey($el.value)"
         class="text-sm px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/40 cursor-pointer">
         <option value="name"       data-i18n="sortName">Sort: Name</option>
         <option value="speed"      data-i18n="sortSpeed">Sort: Speed</option>
@@ -134,6 +304,7 @@
         <option value="occupancy"  data-i18n="sortOccupancy">Sort: Occupancy</option>
         <option value="line"       data-i18n="sortLine">Sort: Line</option>
       </select>
+
       <!-- CSV export -->
       <button id="export-csv"
         class="flex items-center gap-1.5 text-sm px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:border-slate-300 dark:hover:border-slate-600 transition-all">
@@ -145,7 +316,7 @@
     <!-- ── Table + Detail Panel ───────────────────────────────────────── -->
     <div class="flex gap-4 items-start">
 
-      <!-- Table -->
+      <!-- Table (rendered by app.js, same as before) -->
       <div class="flex-1 min-w-0 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
         <div class="overflow-x-auto">
           <table id="vehicle-table" class="w-full">
@@ -161,7 +332,6 @@
                 <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap select-none"                                                                                                              data-i18n="colPax">Pax</th>
                 <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap select-none"                                                                                                              data-i18n="colOccupancy">Occupancy</th>
               </tr>
-              <!-- Column filter inputs -->
               <tr class="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70">
                 <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="name"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
                 <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="type"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
@@ -183,11 +353,26 @@
         </div>
       </div>
 
-      <!-- Detail panel -->
-      <div id="detail-panel" class="hidden w-72 shrink-0 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 self-start sticky top-16">
+      <!--
+        Detail panel:
+        • Alpine x-show replaces class="hidden" toggled by JS
+        • x-transition provides the slide-in/out animation (replaces Motion One for this element)
+        • @click on close button calls store.closeDetail()
+      -->
+      <div
+        x-show="$store.app.detailVisible"
+        x-transition:enter="transition ease-out duration-200"
+        x-transition:enter-start="opacity-0 translate-x-4"
+        x-transition:enter-end="opacity-100 translate-x-0"
+        x-transition:leave="transition ease-in duration-150"
+        x-transition:leave-start="opacity-100 translate-x-0"
+        x-transition:leave-end="opacity-0 translate-x-4"
+        id="detail-panel"
+        class="w-72 shrink-0 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 self-start sticky top-16">
         <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
           <h2 id="dp-name" class="font-semibold text-sm text-blue-600 dark:text-blue-400 truncate flex-1">–</h2>
-          <button id="detail-close"
+          <button
+            @click="$store.app.closeDetail()"
             class="shrink-0 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors">
             <i data-lucide="x" class="w-3.5 h-3.5"></i>
           </button>

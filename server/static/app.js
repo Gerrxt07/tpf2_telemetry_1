@@ -1,15 +1,27 @@
 /**
- * TPF2 Real-Time Telemetry – Frontend
- * ES module: imports Motion One for animations.
- * Lucide icons initialised via UMD build loaded in index.html.
- * Supports DE / EN UI language and dark / light theme.
+ * TPF2 Real-Time Telemetry – Frontend (app.js)
+ *
+ * Works in tandem with Alpine.js (store) and HTMX (REST polling fallback):
+ *
+ *  Alpine store  → owns reactive UI state (stats, connState, filterType, …)
+ *  HTMX          → fires /api/telemetry on load + every 5 s as WS fallback
+ *  app.js        → WebSocket, table rendering, filtering/sorting, CSV, i18n
+ *
+ * Public window globals exposed for Alpine / HTMX callbacks:
+ *  window.tpf2Render      – re-render vehicle table
+ *  window.tpf2T           – translation function
+ *  window.tpf2ToggleLang  – toggle DE / EN
+ *  window.tpf2CloseDetail – close detail panel
+ *  window.tpf2HandleData  – process a raw telemetry payload object
+ *  window.tpf2HandleHtmx  – HTMX after-request callback
+ *  window.tpf2WsConnected – boolean, true while WS is open
  */
 
 "use strict";
 
 // ─── Motion One (CDN) – graceful fallback if offline ─────────────────────────
-let _animate  = null;
-let _stagger  = null;
+let _animate = null;
+let _stagger = null;
 try {
   const m = await import("https://cdn.jsdelivr.net/npm/motion@11/+esm");
   _animate = m.animate;
@@ -17,6 +29,14 @@ try {
 } catch (_) { /* offline – animations disabled */ }
 
 const doAnimate = (...args) => { if (_animate) _animate(...args); };
+
+// Named easing presets for Motion One
+const EASING_SPRING    = [0.34, 1.56, 0.64, 1]; // spring overshoot
+const EASING_OUT_CUBIC = [0.33, 1, 0.68, 1];    // ease-out-cubic
+
+// ─── Alpine store accessor ─────────────────────────────────────────────────
+// Alpine is deferred and guaranteed to be initialized before this module runs.
+const appStore = () => window.Alpine?.store('app');
 
 // ─── Localisation strings ─────────────────────────────────────────────────────
 const STRINGS = {
@@ -37,13 +57,14 @@ const STRINGS = {
     ship:              "⛴ Schiff",
     plane:             "✈ Flugzeug",
     sortName:          "Sortierung: Name",
-    sortPassengers:    "Sort: Passagiere",
-    sortType:          "Sort: Typ",
-    sortState:         "Sort: Zustand",
-    sortLastStop:      "Sort: Letzter Halt",
-    sortNextStop:      "Sort: Nächster Halt",
-    sortOccupancy:     "Sort: Auslastung",
-    sortLine:          "Sort: Linie",
+    sortSpeed:         "Sortierung: Geschwindigkeit",
+    sortPassengers:    "Sortierung: Passagiere",
+    sortType:          "Sortierung: Typ",
+    sortState:         "Sortierung: Zustand",
+    sortLastStop:      "Sortierung: Letzter Halt",
+    sortNextStop:      "Sortierung: Nächster Halt",
+    sortOccupancy:     "Sortierung: Auslastung",
+    sortLine:          "Sortierung: Linie",
     colVehicle:        "Fahrzeug",
     colType:           "Typ",
     colLine:           "Linie",
@@ -170,7 +191,8 @@ const STRINGS = {
 };
 
 // ─── i18n helpers ─────────────────────────────────────────────────────────────
-let _lang = localStorage.getItem("tpf2_lang") || "de";
+// _lang is kept in sync with Alpine store.app.lang
+let _lang = appStore()?.lang ?? localStorage.getItem("tpf2_lang") ?? "de";
 
 function t(key, vars) {
   let str = (STRINGS[_lang] || STRINGS.de)[key] || key;
@@ -186,26 +208,15 @@ function applyI18n() {
   document.documentElement.lang = _lang;
 }
 
-// ─── Theme ────────────────────────────────────────────────────────────────────
-let _darkMode = localStorage.getItem("tpf2_theme") !== "light";
+// Expose t() for Alpine inline expressions (conn-label text lookup)
+window.tpf2T = t;
 
-function applyTheme() {
-  document.documentElement.classList.toggle("dark", _darkMode);
-  const btn = document.getElementById("theme-toggle");
-  if (btn) btn.textContent = _darkMode ? "☀️" : "🌙";
-}
-
-// Named easing presets for Motion One
-const EASING_SPRING  = [0.34, 1.56, 0.64, 1]; // spring overshoot
-const EASING_OUT_CUBIC = [0.33, 1, 0.68, 1];  // ease-out-cubic
+// ─── App config ───────────────────────────────────────────────────────────────
 const WS_URL             = `ws://${location.host}/ws`;
 const RECONNECT_DELAY_MS = 3000;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let _state = { vehicles: [], lines: [], stations: [], stats: {}, game_time: null, timestamp: null };
-let _filterType    = "ALL";
-let _sortKey       = "name";
-let _searchQuery   = "";
 let _selectedVid   = null;
 let _ws            = null;
 let _reconnecting  = false;
@@ -213,23 +224,17 @@ let _firstRender   = true;
 let _stationById   = new Map();
 let _lineById      = new Map();
 let _columnFilters = { name:"", type:"", line_name:"", state:"", last_stop_name:"", next_stop_name:"" };
-let _prevStats     = {};
+
+// WS connection state (read by tpf2HandleHtmx to avoid double-processing)
+window.tpf2WsConnected = false;
 
 // ─── DOM references ───────────────────────────────────────────────────────────
-const connDot       = document.getElementById("conn-dot");
 const connLabel     = document.getElementById("conn-label");
-const gameTimeBox   = document.getElementById("game-time-box");
-const gameTimeText  = document.getElementById("game-time-text");
-const lastUpdateBox = document.getElementById("last-update-box");
-const lastUpdateText= document.getElementById("last-update-text");
 const tbody         = document.getElementById("vehicle-tbody");
 const detailPanel   = document.getElementById("detail-panel");
 const dpName        = document.getElementById("dp-name");
 const dpGrid        = document.getElementById("dp-grid");
 const searchInput   = document.getElementById("search-input");
-const sortSelect    = document.getElementById("sort-select");
-const langToggle    = document.getElementById("lang-toggle");
-const themeToggle   = document.getElementById("theme-toggle");
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -284,7 +289,7 @@ function timeAgo(ts) {
 }
 
 function fmtGameTime(gt) {
-  if (!gt) return "–";
+  if (!gt) return null;
   if (typeof gt === "number") return String(gt);
   if (typeof gt === "object") {
     const d = gt.date || gt;
@@ -335,13 +340,20 @@ function resolveStopName(v, which) {
 }
 
 // ─── Filtering & sorting ──────────────────────────────────────────────────────
+// Read reactive state from Alpine store (primary) with local fallback
+function getFilterType()  { return appStore()?.filterType   ?? "ALL";  }
+function getSortKey()     { return appStore()?.sortKey       ?? "name"; }
+function getSearchQuery() { return appStore()?.searchQuery   ?? "";     }
+
 function filteredVehicles() {
-  let list = _state.vehicles || [];
+  let list         = _state.vehicles || [];
+  const filterType = getFilterType();
+  const searchQ    = getSearchQuery();
 
-  if (_filterType !== "ALL") list = list.filter(v => getVehicleType(v) === _filterType);
+  if (filterType !== "ALL") list = list.filter(v => getVehicleType(v) === filterType);
 
-  if (_searchQuery) {
-    const q = _searchQuery.toLowerCase();
+  if (searchQ) {
+    const q = searchQ.toLowerCase();
     list = list.filter(v =>
       (v.name||"").toLowerCase().includes(q) ||
       (v.line_name||"").toLowerCase().includes(q) ||
@@ -350,13 +362,21 @@ function filteredVehicles() {
     );
   }
 
-  const cfKeys = ["name","type","line_name","state"];
-  for (const k of cfKeys) {
-    if (_columnFilters[k]) {
-      const q = _columnFilters[k].toLowerCase();
-      if (k === "type") list = list.filter(v => getVehicleType(v).toLowerCase().includes(q));
-      else              list = list.filter(v => (v[k]||"").toLowerCase().includes(q));
-    }
+  if (_columnFilters.name) {
+    const q = _columnFilters.name.toLowerCase();
+    list = list.filter(v => (v.name||"").toLowerCase().includes(q));
+  }
+  if (_columnFilters.type) {
+    const q = _columnFilters.type.toLowerCase();
+    list = list.filter(v => getVehicleType(v).toLowerCase().includes(q));
+  }
+  if (_columnFilters.line_name) {
+    const q = _columnFilters.line_name.toLowerCase();
+    list = list.filter(v => (v.line_name||"").toLowerCase().includes(q));
+  }
+  if (_columnFilters.state) {
+    const q = _columnFilters.state.toLowerCase();
+    list = list.filter(v => (v.state||"").toLowerCase().includes(q));
   }
   if (_columnFilters.last_stop_name) {
     const q = _columnFilters.last_stop_name.toLowerCase();
@@ -367,13 +387,14 @@ function filteredVehicles() {
     list = list.filter(v => resolveStopName(v,"next").toLowerCase().includes(q));
   }
 
+  const sortKey = getSortKey();
   return [...list].sort((a, b) => {
     const aOcc = (a.capacity||0)>0 ? (a.passengers||0)/a.capacity : -1;
     const bOcc = (b.capacity||0)>0 ? (b.passengers||0)/b.capacity : -1;
-    switch (_sortKey) {
+    switch (sortKey) {
       case "speed":      return (b.speed_kmh||0)-(a.speed_kmh||0);
       case "passengers": return (b.passengers||0)-(a.passengers||0);
-      case "type":       return _filterType==="ALL"
+      case "type":       return getFilterType()==="ALL"
         ? getVehicleType(a).localeCompare(getVehicleType(b))||(a.name||"").localeCompare(b.name||"")
         : (a.name||"").localeCompare(b.name||"");
       case "state":      return (a.state||"").localeCompare(b.state||"")||(a.name||"").localeCompare(b.name||"");
@@ -405,33 +426,35 @@ function updateStatCard(id, value) {
   if (!el) return;
   const newText = value ?? "–";
   if (el.textContent === String(newText)) return;
-  el.textContent = newText;
+  // Alpine x-text manages the value; we only animate the flash
   doAnimate(el, { scale: [1.18, 1], color: ["#3b82f6", ""] }, { duration: 0.35, easing: EASING_SPRING });
 }
 
-// ─── Rendering ────────────────────────────────────────────────────────────────
+// ─── Render stats into Alpine store ──────────────────────────────────────────
 function renderStats() {
-  const s = _state.stats || {};
-  updateStatCard("sv-vehicles",   s.total_vehicles);
-  updateStatCard("sv-passengers", s.total_passengers);
-  updateStatCard("sv-lines",      s.total_lines);
-  updateStatCard("sv-stations",   s.total_stations);
+  const store = appStore();
+  const s     = _state.stats || {};
+  if (store) {
+    // Animate flash if value changed before Alpine x-text updates it
+    if (store.stats.total_vehicles !== s.total_vehicles)   updateStatCard("sv-vehicles",   s.total_vehicles);
+    if (store.stats.total_passengers !== s.total_passengers) updateStatCard("sv-passengers", s.total_passengers);
+    if (store.stats.total_lines !== s.total_lines)         updateStatCard("sv-lines",      s.total_lines);
+    if (store.stats.total_stations !== s.total_stations)   updateStatCard("sv-stations",   s.total_stations);
 
-  if (_state.timestamp && lastUpdateText)
-    lastUpdateText.textContent = t("lastUpdated") + timeAgo(_state.timestamp);
-
-  if (_state.game_time && gameTimeText) {
-    gameTimeText.textContent = fmtGameTime(_state.game_time);
-    if (gameTimeBox) gameTimeBox.style.display = "flex";
+    // Update Alpine store (x-text bindings update automatically)
+    store.stats       = { ...s };
+    store.gameTime    = fmtGameTime(_state.game_time);
+    store.lastUpdated = t("lastUpdated") + timeAgo(_state.timestamp);
   }
 }
 
+// ─── Render table ─────────────────────────────────────────────────────────────
 function renderTable() {
   const list = filteredVehicles();
 
   if (list.length === 0) {
     tbody.innerHTML = `<tr><td colspan="9" class="empty-cell">
-      ${_searchQuery || _filterType !== "ALL" ? t("noResults") : t("waitingForVehicles")}
+      ${getSearchQuery() || getFilterType() !== "ALL" ? t("noResults") : t("waitingForVehicles")}
     </td></tr>`;
     return;
   }
@@ -442,8 +465,8 @@ function renderTable() {
   for (const row of tbody.querySelectorAll("tr[data-vid]"))
     existing.set(String(row.dataset.vid), row);
 
-  const seen   = new Set();
-  let   cursor = tbody.firstElementChild;
+  const seen    = new Set();
+  let   cursor  = tbody.firstElementChild;
   const newRows = [];
 
   for (const v of list) {
@@ -477,25 +500,24 @@ function renderTable() {
     }
 
     row.classList.toggle("selected", String(vid) === String(_selectedVid));
-
     if (row === cursor) cursor = cursor.nextElementSibling;
     else tbody.insertBefore(row, cursor);
   }
 
   for (const [vid, row] of existing) if (!seen.has(vid)) row.remove();
 
-  // Animate newly added rows or first render
   if (_firstRender && tbody.querySelectorAll("tr[data-vid]").length > 0) {
     const rows = Array.from(tbody.querySelectorAll("tr[data-vid]"));
-    doAnimate(rows,
-      { opacity: [0, 1], y: [6, 0] },
-      { delay: _stagger ? _stagger(0.025) : 0, duration: 0.2, easing: "ease-out" }
-    );
+    doAnimate(rows, { opacity: [0, 1], y: [6, 0] },
+      { delay: _stagger ? _stagger(0.025) : 0, duration: 0.2, easing: "ease-out" });
     _firstRender = false;
   } else if (newRows.length > 0) {
     doAnimate(newRows, { opacity: [0, 1] }, { duration: 0.2 });
   }
 }
+
+// Expose for Alpine store callbacks
+window.tpf2Render = renderTable;
 
 // ─── Detail panel ─────────────────────────────────────────────────────────────
 function openDetail(vid, rerenderTable = true) {
@@ -533,30 +555,35 @@ function openDetail(vid, rerenderTable = true) {
     return `<div class="dp-key">${esc(row[0])}</div><div class="dp-value">${esc(String(row[1] ?? "–"))}</div>`;
   }).join("");
 
-  const wasHidden = detailPanel.classList.contains("hidden");
-  detailPanel.classList.remove("hidden");
-
-  if (wasHidden) {
-    doAnimate(detailPanel, { opacity: [0, 1], x: [16, 0] },
-      { duration: 0.22, easing: EASING_OUT_CUBIC });
-  }
+  // Alpine x-show / x-transition handle visibility + animation
+  const store = appStore();
+  if (store) store.detailVisible = true;
 
   if (rerenderTable) renderTable();
 }
 
-document.getElementById("detail-close").addEventListener("click", () => {
+// Close detail panel (called by Alpine store.closeDetail())
+window.tpf2CloseDetail = () => {
   _selectedVid = null;
-  const anim = _animate
-    ? _animate(detailPanel, { opacity: [1, 0], x: [0, 16] }, { duration: 0.18, easing: "ease-in" })
-    : null;
-  const hide = () => detailPanel.classList.add("hidden");
-  if (anim?.finished) anim.finished.then(hide); else hide();
+  const store = appStore();
+  if (store) store.detailVisible = false;
   renderTable();
-});
+};
+
+// ─── Central data handler ─────────────────────────────────────────────────────
+function handleTelemetryData(data) {
+  if (!data || typeof data !== "object") return;
+  _state = data;
+  rebuildIndexes();
+  renderStats();
+  renderTable();
+  if (_selectedVid != null) openDetail(_selectedVid, false);
+}
+window.tpf2HandleData = handleTelemetryData;
 
 // ─── CSV export ───────────────────────────────────────────────────────────────
 function exportCSV() {
-  const list = filteredVehicles();
+  const list    = filteredVehicles();
   const headers = ["ID","Name","Type","Line","State","Speed (km/h)",
     "Last Stop","Next Stop","Passengers","Capacity","Cargo","Cargo Capacity",
     "Pos X","Pos Y","Pos Z"];
@@ -570,25 +597,15 @@ function exportCSV() {
     .map(r => r.map(c => `"${String(c??"").replace(/"/g,'""')}"`).join(","))
     .join("\r\n");
   const a = Object.assign(document.createElement("a"), {
-    href: URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8;" })),
+    href:     URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8;" })),
     download: `tpf2_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.csv`,
   });
   a.click();
   URL.revokeObjectURL(a.href);
 }
-
 document.getElementById("export-csv").addEventListener("click", exportCSV);
 
-// ─── Filter events ────────────────────────────────────────────────────────────
-document.getElementById("type-filter").addEventListener("click", e => {
-  const pill = e.target.closest(".pill");
-  if (!pill) return;
-  document.querySelectorAll(".pill").forEach(p => p.classList.remove("active"));
-  pill.classList.add("active");
-  _filterType = pill.dataset.type;
-  renderTable();
-});
-
+// ─── Column filter inputs (remain in app.js – complex, not Alpine) ────────────
 document.querySelector("#vehicle-table thead").addEventListener("click", e => {
   const th = e.target.closest("th[data-filter-key]");
   if (!th) return;
@@ -603,51 +620,67 @@ document.querySelectorAll(".col-filter-input[data-filter-key]").forEach(input =>
   });
 });
 
-searchInput.addEventListener("input", () => { _searchQuery = searchInput.value.trim(); renderTable(); });
-sortSelect.addEventListener("change", () => { _sortKey = sortSelect.value; renderTable(); });
-
-// ─── Language & theme ─────────────────────────────────────────────────────────
-langToggle.addEventListener("click", () => {
+// ─── Language toggle (called by Alpine store.toggleLang()) ───────────────────
+window.tpf2ToggleLang = () => {
   _lang = _lang === "de" ? "en" : "de";
   localStorage.setItem("tpf2_lang", _lang);
-  langToggle.textContent = _lang.toUpperCase();
+
+  // Sync Alpine store.lang so x-text on the button updates
+  const store = appStore();
+  if (store) store.lang = _lang;
+
   applyI18n();
   renderStats();
   renderTable();
   updateHeaderFilterIndicators();
   if (_selectedVid != null) openDetail(_selectedVid, false);
-});
+};
 
-themeToggle.addEventListener("click", () => {
-  _darkMode = !_darkMode;
-  localStorage.setItem("tpf2_theme", _darkMode ? "dark" : "light");
-  applyTheme();
-});
+// ─── HTMX callback ────────────────────────────────────────────────────────────
+// Called by hx-on::after-request on the polling div in index.html.
+// Only uses REST data when the WebSocket is NOT connected (true fallback).
+window.tpf2HandleHtmx = (event) => {
+  const xhr = event?.detail?.xhr;
+  if (!xhr || xhr.status !== 200) return;
+  if (window.tpf2WsConnected) return; // WS is live – REST data not needed
+  try {
+    handleTelemetryData(JSON.parse(xhr.responseText));
+  } catch (_) {}
+};
 
-// ─── WebSocket ────────────────────────────────────────────────────────────────
+// ─── Connection state ─────────────────────────────────────────────────────────
 function setConnState(state) {
-  connDot.className = "";
-  connDot.classList.add(state);
-  const labels = { connecting: t("connecting"), connected: t("connected"), disconnected: t("disconnected") };
-  connLabel.textContent = labels[state] || state;
+  // Update Alpine store (badge :class + dot :class animate reactively)
+  const store = appStore();
+  if (store) store.connState = state;
+
+  // Also update the static text label (applyI18n handles translation)
+  const labels = {
+    connecting:   t("connecting"),
+    connected:    t("connected"),
+    disconnected: t("disconnected"),
+  };
+  if (connLabel) connLabel.textContent = labels[state] || state;
+
+  window.tpf2WsConnected = (state === "connected");
 }
 
+// ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWS() {
   if (_ws && _ws.readyState <= 1) return;
   setConnState("connecting");
   _ws = new WebSocket(WS_URL);
 
-  _ws.onopen = () => { setConnState("connected"); _reconnecting = false; };
+  _ws.onopen = () => {
+    setConnState("connected");
+    _reconnecting = false;
+  };
 
   _ws.onmessage = evt => {
     try {
       const data = JSON.parse(evt.data);
       if (data.type === "ping") return;
-      _state = data;
-      rebuildIndexes();
-      renderStats();
-      renderTable();
-      if (_selectedVid != null) openDetail(_selectedVid, false);
+      handleTelemetryData(data);
     } catch (e) { console.warn("WebSocket parse error:", e); }
   };
 
@@ -660,38 +693,28 @@ function connectWS() {
 }
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
-langToggle.textContent = _lang.toUpperCase();
-applyTheme();
+// Alpine is already initialized (defer + module ordering guarantee).
+// Apply i18n to data-i18n elements (Alpine owns the reactive values,
+// app.js owns the static text labels and placeholders).
 applyI18n();
 
-// Initialise Lucide icons (UMD build exposed as window.lucide)
+// Initialise Lucide icons
 if (window.lucide) window.lucide.createIcons();
 
 // Animate stats cards in
-  doAnimate(
+doAnimate(
   document.querySelectorAll(".stat-card"),
   { opacity: [0, 1], y: [12, 0] },
   { delay: _stagger ? _stagger(0.07) : 0, duration: 0.35, easing: EASING_OUT_CUBIC }
 );
 
-// Initial REST fetch (before WebSocket connects)
-fetch("/api/telemetry")
-  .then(r => r.json())
-  .then(data => {
-    if (data && Object.keys(data).length > 0) {
-      _state = data;
-      rebuildIndexes();
-      renderStats();
-      renderTable();
-    }
-  })
-  .catch(() => {});
-
 connectWS();
 updateHeaderFilterIndicators();
 
-// Refresh "last updated" label every second
+// Refresh "last updated" label every second via Alpine store
 setInterval(() => {
-  if (_state.timestamp && lastUpdateText)
-    lastUpdateText.textContent = t("lastUpdated") + timeAgo(_state.timestamp);
+  const store = appStore();
+  if (store && _state.timestamp) {
+    store.lastUpdated = t("lastUpdated") + timeAgo(_state.timestamp);
+  }
 }, 1000);
