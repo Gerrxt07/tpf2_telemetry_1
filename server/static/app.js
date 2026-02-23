@@ -223,6 +223,7 @@ let _reconnecting  = false;
 let _firstRender   = true;
 let _stationById   = new Map();
 let _lineById      = new Map();
+let _stopNameById  = new Map(); // covers both station_id and raw_stop_id from line stops
 let _columnFilters = { name:"", type:"", line_name:"", state:"", last_stop_name:"", next_stop_name:"" };
 
 // WS connection state (read by tpf2HandleHtmx to avoid double-processing)
@@ -309,6 +310,18 @@ function rebuildIndexes() {
   for (const s of (_state.stations || [])) if (s?.id != null) _stationById.set(Number(s.id), s.name || "");
   _lineById = new Map();
   for (const l of (_state.lines || [])) if (l?.id != null) _lineById.set(Number(l.id), l);
+  // Build a name lookup from all line-stop IDs (station_id and raw_stop_id) to cover
+  // cases where terminal IDs in vehicle data don't match station-group IDs in _stationById.
+  _stopNameById = new Map();
+  for (const l of (_state.lines || [])) {
+    for (const stop of (l.stops || [])) {
+      const name = stop.name || "";
+      if (!isPlaceholderName(name)) {
+        if (stop.station_id  && Number(stop.station_id)  !== 0) _stopNameById.set(Number(stop.station_id),  name);
+        if (stop.raw_stop_id && Number(stop.raw_stop_id) !== 0) _stopNameById.set(Number(stop.raw_stop_id), name);
+      }
+    }
+  }
 }
 
 function isPlaceholderName(name) {
@@ -331,9 +344,16 @@ function resolveStopName(v, which) {
   if (rawName && !isPlaceholderName(rawName)) return rawName;
   const byStation = _stationById.get(stopId);
   if (byStation && !isPlaceholderName(byStation)) return byStation;
+  // Try the comprehensive stop-name map (covers raw_stop_id / terminal IDs)
+  const byStop = _stopNameById.get(stopId);
+  if (byStop && !isPlaceholderName(byStop)) return byStop;
   const line = _lineById.get(Number(v.line_id || 0));
   if (line?.stops) {
-    const stop = line.stops.find(s => Number(s.station_id||0) === stopId);
+    // Match by station_id OR raw_stop_id to handle terminal-vs-station-group ID mismatch
+    const stop = line.stops.find(s =>
+      Number(s.station_id||0) === stopId ||
+      Number(s.raw_stop_id||0) === stopId
+    );
     if (stop?.name && !isPlaceholderName(stop.name)) return stop.name;
   }
   return rawName || (stopId ? `Stop #${stopId}` : "–");

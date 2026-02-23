@@ -382,8 +382,9 @@ local function buildStationCache()
     _terminalToStation = {}
     local ids = getAllStationIds()
     for _, sid in ipairs(ids) do
-        local name = ""
-        local pos  = {x = 0, y = 0, z = 0}
+        local name   = ""
+        local pos    = {x = 0, y = 0, z = 0}
+        local sidInt = safeInt(sid)
 
         local ent = getEntity(sid)
         if ent then
@@ -403,18 +404,23 @@ local function buildStationCache()
                 }
             end
 
-            -- NEU: Terminals der Station auslesen und zuordnen
-            if type(ent.terminals) == "table" then
-                for _, termId in ipairs(ent.terminals) do
-                    _terminalToStation[safeInt(termId)] = safeInt(sid)
+            -- Sub-Entitaeten der Station auslesen und im Mapping speichern
+            -- Verschiedene Feldnamen fuer Sub-Entitaeten ausprobieren
+            for _, field in ipairs({"terminals", "components", "platforms", "nodes", "stops", "tracks"}) do
+                if type(ent[field]) == "table" then
+                    for _, subId in ipairs(ent[field]) do
+                        local subIdInt = safeInt(subId)
+                        if subIdInt ~= 0 then
+                            _terminalToStation[subIdInt] = sidInt
+                        end
+                    end
                 end
             end
         end
 
-        local sidInt = safeInt(sid)
         _stationCache[sidInt] = {
             id   = sidInt,
-            name = name ~= "" and name or ("Station #" .. safeInt(sid)),
+            name = name ~= "" and name or ("Station #" .. sidInt),
             pos  = pos,
         }
     end
@@ -439,10 +445,12 @@ local function collectLines()
         -- Fallback: Terminal-Entity laden und prüfen
         local tEnt = getEntity(id)
         if tEnt then
-            local sId = safeInt(tEnt.station or tEnt.stationGroup or 0)
-            if sId ~= 0 and _stationCache[sId] then
-                _terminalToStation[id] = sId -- cachen
-                return sId
+            for _, field in ipairs({"station", "stationGroup", "stationEntity", "owner", "parent", "group"}) do
+                local sId = safeInt(tEnt[field] or 0)
+                if sId ~= 0 and _stationCache[sId] then
+                    _terminalToStation[id] = sId -- cachen
+                    return sId
+                end
             end
         end
         return 0
@@ -723,12 +731,16 @@ local function enrichVehiclesWithLineNames(vehicles, lines)
                 if lastIdx < 1 then lastIdx = line.stop_count end
                 
                 if line.stops[nextIdx] then
-                    v.next_stop_id = line.stops[nextIdx].station_id
-                    v.next_stop_name = line.stops[nextIdx].name
+                    local ns = line.stops[nextIdx]
+                    local nId = ns.station_id ~= 0 and ns.station_id or ns.raw_stop_id
+                    if nId and nId ~= 0 then v.next_stop_id = nId end
+                    v.next_stop_name = ns.name
                 end
                 if line.stops[lastIdx] then
-                    v.last_stop_id = line.stops[lastIdx].station_id
-                    v.last_stop_name = line.stops[lastIdx].name
+                    local ls = line.stops[lastIdx]
+                    local lId = ls.station_id ~= 0 and ls.station_id or ls.raw_stop_id
+                    if lId and lId ~= 0 then v.last_stop_id = lId end
+                    v.last_stop_name = ls.name
                 end
             end
         end
