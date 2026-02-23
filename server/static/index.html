@@ -185,6 +185,13 @@
 
   <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-5 space-y-4">
 
+    <div class="flex items-center gap-2" id="view-tabs">
+      <button class="view-tab active" data-view="list" data-i18n="tabList">List View</button>
+      <button class="view-tab" data-view="map" data-i18n="tabMap">Map View</button>
+    </div>
+
+    <div id="list-view" class="space-y-4">
+
     <!-- ── Stats – Alpine x-text replaces getElementById + textContent ── -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" id="stats-row">
 
@@ -380,6 +387,14 @@
         <div id="dp-grid" class="p-4 max-h-[calc(100vh-8rem)] overflow-y-auto"></div>
       </div>
 
+    </div>
+
+    </div>
+
+    <div id="map-view" class="hidden">
+      <div class="map-container rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden">
+        <canvas id="telemetryMap"></canvas>
+      </div>
     </div>
   </div>
 

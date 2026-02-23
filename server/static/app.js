@@ -111,6 +111,8 @@ const STRINGS = {
     exportCsv:         "CSV Export",
     apiDocs:           "API-Docs",
     rawJson:           "Raw JSON",
+    tabList:           "Listenansicht",
+    tabMap:            "Kartenansicht",
     filterActive:      "Filter aktiv: {v}",
     filterClick:       "Zum Filterfeld klicken",
   },
@@ -185,6 +187,8 @@ const STRINGS = {
     exportCsv:         "CSV Export",
     apiDocs:           "API Docs",
     rawJson:           "Raw JSON",
+    tabList:           "List View",
+    tabMap:            "Map View",
     filterActive:      "Filter active: {v}",
     filterClick:       "Click to focus filter",
   },
@@ -216,7 +220,7 @@ const WS_URL             = `ws://${location.host}/ws`;
 const RECONNECT_DELAY_MS = 3000;
 
 // ─── State ────────────────────────────────────────────────────────────────────
-let _state = { vehicles: [], lines: [], stations: [], stats: {}, game_time: null, timestamp: null };
+let _state = { vehicles: [], lines: [], stations: [], stats: {}, game_time: null, timestamp: null, paths: [], signals: [] };
 let _selectedVid   = null;
 let _ws            = null;
 let _reconnecting  = false;
@@ -225,6 +229,8 @@ let _stationById   = new Map();
 let _lineById      = new Map();
 let _stopNameById  = new Map(); // covers both station_id and raw_stop_id from line stops
 let _columnFilters = { name:"", type:"", line_name:"", state:"", last_stop_name:"", next_stop_name:"" };
+let _activeView    = "list";
+let _lastMapData   = null;
 
 // WS connection state (read by tpf2HandleHtmx to avoid double-processing)
 window.tpf2WsConnected = false;
@@ -236,6 +242,11 @@ const detailPanel   = document.getElementById("detail-panel");
 const dpName        = document.getElementById("dp-name");
 const dpGrid        = document.getElementById("dp-grid");
 const searchInput   = document.getElementById("search-input");
+const viewTabs      = document.querySelectorAll("#view-tabs .view-tab");
+const listView      = document.getElementById("list-view");
+const mapView       = document.getElementById("map-view");
+const mapCanvas     = document.getElementById("telemetryMap");
+const mapCtx        = mapCanvas ? mapCanvas.getContext("2d") : null;
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -303,6 +314,172 @@ function fmtGameTime(gt) {
     }
   }
   return JSON.stringify(gt);
+}
+
+// ─── Map helpers ──────────────────────────────────────────────────────────────
+function normalizePoint(pt) {
+  if (!pt) return null;
+  if (Array.isArray(pt)) {
+    const x = Number(pt[0]);
+    const y = Number(pt[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  }
+  if (typeof pt === "object") {
+    const x = Number(pt.x ?? pt[0]);
+    const y = Number(pt.y ?? pt[1]);
+    if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  }
+  return null;
+}
+
+function computeBounds(data) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const consider = (pt) => {
+    const p = normalizePoint(pt);
+    if (!p) return;
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y);
+    maxY = Math.max(maxY, p.y);
+  };
+
+  (data.stations || []).forEach(s => consider(s.pos));
+  (data.vehicles || []).forEach(v => consider(v.position));
+  (data.signals  || []).forEach(s => consider(s.pos));
+  (data.paths    || []).forEach(p => (p.points || []).forEach(consider));
+
+  if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) return null;
+
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  const pad   = 0.1 * Math.max(spanX, spanY);
+
+  return {
+    minX: minX - pad,
+    maxX: maxX + pad,
+    minY: minY - pad,
+    maxY: maxY + pad,
+  };
+}
+
+function resizeCanvasToDisplay() {
+  if (!mapCanvas || !mapCtx) return { width: 0, height: 0 };
+  const rect = mapCanvas.getBoundingClientRect();
+  const cssWidth  = Math.max(1, Math.floor(rect.width));
+  const cssHeight = Math.max(1, Math.floor(rect.height));
+  const dpr = window.devicePixelRatio || 1;
+
+  const width  = Math.floor(cssWidth * dpr);
+  const height = Math.floor(cssHeight * dpr);
+
+  if (mapCanvas.width !== width || mapCanvas.height !== height) {
+    mapCanvas.width  = width;
+    mapCanvas.height = height;
+  }
+  mapCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { width: cssWidth, height: cssHeight };
+}
+
+function drawMap(data) {
+  _lastMapData = data;
+  if (_activeView !== "map" || !mapCtx || !mapCanvas || !data) return;
+
+  const size   = resizeCanvasToDisplay();
+  const width  = size.width;
+  const height = size.height;
+
+  mapCtx.fillStyle = "#1e1e1e";
+  mapCtx.fillRect(0, 0, width, height);
+
+  const bounds = computeBounds(data);
+  if (!bounds) return;
+
+  const spanX  = bounds.maxX - bounds.minX;
+  const spanY  = bounds.maxY - bounds.minY;
+  const scale  = Math.min(width / spanX, height / spanY);
+  const offX   = (width  - spanX * scale) / 2;
+  const offY   = (height - spanY * scale) / 2;
+  const project = (pt) => {
+    const p = normalizePoint(pt);
+    if (!p) return null;
+    return {
+      x: offX + (p.x - bounds.minX) * scale,
+      y: height - (offY + (p.y - bounds.minY) * scale),
+    };
+  };
+
+  // Paths first
+  mapCtx.lineWidth   = 2;
+  mapCtx.strokeStyle = "#444444";
+  for (const path of data.paths || []) {
+    const pts = [];
+    for (const p of path.points || []) {
+      const pr = project(p);
+      if (pr) pts.push(pr);
+    }
+    if (pts.length > 1) {
+      mapCtx.beginPath();
+      mapCtx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) mapCtx.lineTo(pts[i].x, pts[i].y);
+      mapCtx.stroke();
+    }
+  }
+
+  // Signals
+  for (const s of data.signals || []) {
+    const pr = project(s.pos);
+    if (!pr) continue;
+    mapCtx.beginPath();
+    // Signalzustand: 1 = Fahrt/Grün, sonst Halt/Rot
+    mapCtx.fillStyle = Number(s.state) === 1 ? "#00ff00" : "#ff0000";
+    mapCtx.arc(pr.x, pr.y, 2, 0, Math.PI * 2);
+    mapCtx.fill();
+  }
+
+  // Stations
+  mapCtx.font = "10px 'Inter', system-ui, sans-serif";
+  mapCtx.textBaseline = "middle";
+  for (const st of data.stations || []) {
+    const pr = project(st.pos);
+    if (!pr) continue;
+    mapCtx.fillStyle = "#d1d5db";
+    mapCtx.fillRect(pr.x - 3, pr.y - 3, 6, 6);
+    if (st.name) {
+      mapCtx.fillStyle = "#ffffff";
+      mapCtx.fillText(st.name, pr.x + 6, pr.y);
+    }
+  }
+
+  // Vehicles last
+  mapCtx.font = "12px 'Inter', system-ui, sans-serif";
+  for (const v of data.vehicles || []) {
+    const pr = project(v.position);
+    if (!pr) continue;
+    const type  = getVehicleType(v);
+    const color = type === "RAIL" ? "#ff6666" : type === "ROAD" ? "#3b82f6" : "#ffffff";
+    mapCtx.beginPath();
+    mapCtx.fillStyle = color;
+    mapCtx.arc(pr.x, pr.y, 4, 0, Math.PI * 2);
+    mapCtx.fill();
+    if (v.name) {
+      mapCtx.fillStyle = "#ffffff";
+      mapCtx.fillText(v.name, pr.x + 6, pr.y);
+    }
+  }
+}
+
+function setView(view) {
+  _activeView = view === "map" ? "map" : "list";
+  viewTabs.forEach(btn => btn.classList.toggle("active", (btn.dataset.view || "list") === _activeView));
+  if (listView) listView.classList.toggle("hidden", _activeView !== "list");
+  if (mapView)  mapView.classList.toggle("hidden", _activeView !== "map");
+  if (_activeView === "map") {
+    drawMap(_lastMapData || _state);
+  }
+}
+
+if (viewTabs.length) {
+  viewTabs.forEach(btn => btn.addEventListener("click", () => setView(btn.dataset.view || "list")));
 }
 
 function rebuildIndexes() {
@@ -594,10 +771,12 @@ window.tpf2CloseDetail = () => {
 function handleTelemetryData(data) {
   if (!data || typeof data !== "object") return;
   _state = data;
+  _lastMapData = data;
   rebuildIndexes();
   renderStats();
   renderTable();
   if (_selectedVid != null) openDetail(_selectedVid, false);
+  if (_activeView === "map") drawMap(_state);
 }
 window.tpf2HandleData = handleTelemetryData;
 
@@ -638,6 +817,12 @@ document.querySelectorAll(".col-filter-input[data-filter-key]").forEach(input =>
     updateHeaderFilterIndicators();
     renderTable();
   });
+});
+
+window.addEventListener("resize", () => {
+  if (_activeView === "map" && (_lastMapData || _state)) {
+    drawMap(_lastMapData || _state);
+  }
 });
 
 // ─── Language toggle (called by Alpine store.toggleLang()) ───────────────────
@@ -717,6 +902,7 @@ function connectWS() {
 // Apply i18n to data-i18n elements (Alpine owns the reactive values,
 // app.js owns the static text labels and placeholders).
 applyI18n();
+setView("list");
 
 // Initialise Lucide icons
 if (window.lucide) window.lucide.createIcons();
