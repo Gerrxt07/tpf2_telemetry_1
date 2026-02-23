@@ -316,6 +316,32 @@ local function getAllStationIds()
     return {}
 end
 
+-- Gibt alle Signal-IDs zurueck
+local function getAllSignalIds()
+    local ids = {}
+    if api and api.engine and api.engine.getEntityList and api.type and api.type.EntityType then
+        local ET = api.type.EntityType
+        for _, k in ipairs({"SIGNAL", "RAIL_SIGNAL", "RAILROAD_SIGNAL"}) do
+            if ET[k] then
+                local r = safeCall(api.engine.getEntityList, ET[k])
+                if r and #r > 0 then return r end
+            end
+        end
+        for k, v in pairs(ET) do
+            if type(k) == "string" and k:upper():find("SIGNAL") then
+                local r = safeCall(api.engine.getEntityList, v)
+                if r and #r > 0 then return r end
+            end
+        end
+        -- Fallback: bekannte Signal-EntityType-IDs aus TPF2 (robust gegen API-Namensabweichungen)
+        for _, raw in ipairs({18, 17, 16, 19, 20}) do
+            local r = safeCall(api.engine.getEntityList, raw)
+            if r and #r > 0 then return r end
+        end
+    end
+    return ids
+end
+
 -- Gibt eine Entitaet zurueck (game.interface.getEntity ist am zuverlaessigsten)
 local function getEntity(id)
     if game and game.interface and game.interface.getEntity then
@@ -587,6 +613,121 @@ local function collectLines()
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Strecken / Pfade
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function normalizePoint(pt)
+    if type(pt) ~= "table" then return nil end
+    local x = pt.x or pt[1] or pt[0]
+    local y = pt.y or pt[2] or pt[1]
+    if x == nil or y == nil then return nil end
+    return { x = safeFloat(x), y = safeFloat(y) }
+end
+
+local function extractEdgePoints(edgeId)
+    if not (api and api.engine and api.engine.getComponent and api.type and api.type.ComponentType) then
+        return {}
+    end
+    local CT = api.type.ComponentType
+    local comp = safeCall(api.engine.getComponent, edgeId, CT.BASE_EDGE)
+              or (CT.TRACK_EDGE and safeCall(api.engine.getComponent, edgeId, CT.TRACK_EDGE))
+              or (CT.STREET_EDGE and safeCall(api.engine.getComponent, edgeId, CT.STREET_EDGE))
+              or (CT.SIGNAL and safeCall(api.engine.getComponent, edgeId, CT.SIGNAL))
+
+    if not comp then return {} end
+
+    local geom = comp.geometry or comp.geo or comp.geom
+    local coords = nil
+    if geom then
+        coords = geom.coords or geom.points or geom.vertices or geom.samples or geom.middle or geom.positions
+        if not coords and geom.params and geom.params.pos then coords = geom.params.pos end
+    end
+
+    local pts = {}
+    if type(coords) == "table" then
+        for _, p in ipairs(coords) do
+            local np = normalizePoint(p)
+            if np then pts[#pts+1] = np end
+        end
+    elseif comp.node0 and comp.node1 then
+        local n0 = safeCall(api.engine.getComponent, comp.node0, CT.BASE_NODE)
+        local n1 = safeCall(api.engine.getComponent, comp.node1, CT.BASE_NODE)
+        if n0 and n0.position and n1 and n1.position then
+            pts[#pts+1] = { x = safeFloat(n0.position.x or n0.position[1] or 0), y = safeFloat(n0.position.y or n0.position[2] or 0) }
+            pts[#pts+1] = { x = safeFloat(n1.position.x or n1.position[1] or 0), y = safeFloat(n1.position.y or n1.position[2] or 0) }
+        end
+    end
+    return pts
+end
+
+local function collectLinePath(lineId, lineStops)
+    local points = {}
+    local tn = api and api.engine and api.engine.system and api.engine.system.transportNetwork
+    if tn then
+        local ldata = safeCall(tn.getLine, lineId)
+                  or safeCall(tn.getLineObject, lineId)
+                  or safeCall(tn.getLineData, lineId)
+        local edgeLists = {}
+        if type(ldata) == "table" then
+            for _, key in ipairs({"edgeList","edges","edgeIds","segments"}) do
+                if type(ldata[key]) == "table" then edgeLists[#edgeLists+1] = ldata[key] end
+            end
+        end
+        if tn.getLineEdges then
+            local extra = safeCall(tn.getLineEdges, lineId)
+            if type(extra) == "table" then edgeLists[#edgeLists+1] = extra end
+        end
+        for _, edgeList in ipairs(edgeLists) do
+            for _, e in ipairs(edgeList) do
+                local eid = toEntityId(e)
+                if eid ~= 0 then
+                    local pts = extractEdgePoints(eid)
+                    for _, p in ipairs(pts) do points[#points+1] = p end
+                end
+            end
+            if #points > 0 then break end
+        end
+    end
+
+    if #points == 0 and type(lineStops) == "table" then
+        for _, s in ipairs(lineStops) do
+            local pos = nil
+            if s.station_id and _stationCache[s.station_id] then
+                pos = _stationCache[s.station_id].pos
+            end
+            if (not pos) and s.raw_stop_id and s.raw_stop_id ~= 0 then
+                local ent = getEntity(s.raw_stop_id)
+                if ent and ent.position then
+                    pos = {
+                        x = safeFloat(ent.position[1] or ent.position.x or 0),
+                        y = safeFloat(ent.position[2] or ent.position.y or 0)
+                    }
+                elseif ent and ent.transform then
+                    pos = {
+                        x = safeFloat(ent.transform[13] or 0),
+                        y = safeFloat(ent.transform[14] or 0)
+                    }
+                end
+            end
+            if pos then points[#points+1] = { x = safeFloat(pos.x), y = safeFloat(pos.y) } end
+        end
+    end
+
+    return points
+end
+
+local function collectPaths(lines)
+    local paths = {}
+    for _, line in ipairs(lines) do
+        local pts = collectLinePath(line.id, line.stops)
+        if #pts > 0 then
+            paths[#paths+1] = { line_id = line.id, points = pts }
+        end
+    end
+    return paths
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
 -- Fahrzeugdaten
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -710,6 +851,48 @@ local function collectVehicles()
     return vehicles
 end
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Signal-Daten
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function collectSignals()
+    local signals = {}
+    local ids = getAllSignalIds()
+
+    for _, sid in ipairs(ids) do
+        local ent = getEntity(sid)
+        local pos = {x=0, y=0, z=0}
+        if ent then
+            if ent.position then
+                pos = {
+                    x = safeFloat(ent.position[1] or ent.position.x or 0),
+                    y = safeFloat(ent.position[2] or ent.position.y or 0),
+                    z = safeFloat(ent.position[3] or ent.position.z or 0),
+                }
+            elseif ent.transform then
+                pos = extractPosition(ent.transform)
+            end
+        end
+
+        local state = 0
+        if api and api.engine and api.type and api.type.ComponentType and api.engine.getComponent then
+            local comp = safeCall(api.engine.getComponent, sid, api.type.ComponentType.SIGNAL)
+            if comp then
+                state = safeInt(comp.state or comp.signalState or comp.mainState or comp.aspect or comp.value or 0)
+            end
+        end
+        -- Normalisiere beliebige Signalzustände auf 0/1 (0=Rot/Halt, 1=Gruen/Fahrt)
+        if state ~= 0 then state = state > 0 and 1 or 0 end
+
+        signals[#signals+1] = {
+            id    = safeInt(sid),
+            pos   = pos,
+            state = state,
+        }
+    end
+    return signals
+end
+
 -- Liniendaten in Fahrzeuge eintragen (Name der Linie)
 -- Liniendaten in Fahrzeuge eintragen (Name der Linie und Stationen)
 local function enrichVehiclesWithLineNames(vehicles, lines)
@@ -775,7 +958,7 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 
 local function writeJSON(data)
-    local jsonStr = JSON.encode(data, "  ")
+    local jsonStr = JSON.encode(data)
     if not jsonStr then
         print("[TPF2-Telemetry] JSON-Serialisierung fehlgeschlagen")
         return false
@@ -856,6 +1039,12 @@ function collector.write()
     -- Anreicherung
     enrichVehiclesWithLineNames(vehicles, lines)
 
+    -- Pfade
+    local paths = collectPaths(lines)
+
+    -- Signale
+    local signals = collectSignals()
+
     -- Spielzeit
     local gameTime = safeCall(getGameTime)
 
@@ -864,18 +1053,20 @@ function collector.write()
 
     -- Payload
     local payload = {
-        schema_version = 2,
+        schema_version = 3,
         write_count    = _callCounter,   -- Zaehlerwert statt Echtzeit-Timestamp
         game_time      = gameTime,
         stats          = stats,
         vehicles       = vehicles,
         lines          = lines,
         stations       = stations_list,
+        paths          = paths,
+        signals        = signals,
     }
 
     local writeOk = writeJSON(payload)
     if writeOk then
-        print("[TPF2-Telemetry] Snapshot: " .. #vehicles .. " Fahrzeuge, " .. #lines .. " Linien, " .. #stations_list .. " Stationen")
+        print("[TPF2-Telemetry] Snapshot: " .. #vehicles .. " Fahrzeuge, " .. #lines .. " Linien, " .. #stations_list .. " Stationen, " .. #paths .. " Pfade, " .. #signals .. " Signale")
     end
 end
 

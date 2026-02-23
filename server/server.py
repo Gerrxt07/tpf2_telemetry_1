@@ -40,6 +40,7 @@ DEFAULT_TELEMETRY_PATH = Path(__file__).parent.parent / "telemetry.json"
 HOST        = os.environ.get("TPF2_HOST", "127.0.0.1")
 PORT        = int(os.environ.get("TPF2_PORT", "8765"))
 LOG_LEVEL   = os.environ.get("TPF2_LOG_LEVEL", "info")
+WS_MAX_SIZE = int(os.environ.get("TPF2_WS_MAX_SIZE", "0"))  # 0 = unlimited
 
 # Override path via argument or env var
 if len(sys.argv) > 1:
@@ -87,7 +88,7 @@ class TelemetryStore:
         if not data.get("timestamp"):
             data["timestamp"] = int(time.time())
 
-        broadcast_raw = json.dumps(data)
+        broadcast_raw = json.dumps(data, separators=(",", ":"))
 
         async with self._lock:
             self._data = data
@@ -214,6 +215,7 @@ app = FastAPI(
     description = "Shows live data of all trains from Transport Fever 2",
     version     = APP_VERSION,
     lifespan    = lifespan,
+    websocket_max_size = None if WS_MAX_SIZE == 0 else WS_MAX_SIZE,
 )
 
 app.add_middleware(
@@ -352,4 +354,5 @@ if __name__ == "__main__":
         port      = PORT,
         log_level = LOG_LEVEL,
         reload    = False,
+        ws_max_size = None if WS_MAX_SIZE == 0 else WS_MAX_SIZE,
     )

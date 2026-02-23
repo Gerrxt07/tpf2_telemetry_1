@@ -90,6 +90,35 @@ html:not(.dark) .state-idle    { color:#7c3aed; background:rgba(168,85,247,.1); 
 html:not(.dark) .state-stopped { color:#dc2626; background:rgba(239,68,68,.1);   border-color:rgba(220,38,38,.25);   }
 html:not(.dark) .state-unknown { color:#64748b; background:rgba(148,163,184,.08);border-color:rgba(100,116,139,.2);  }
 
+/* ── View tabs + map ─────────────────────────────────────────────────── */
+.view-tab {
+  padding: 0.55rem 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid #334155;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-weight: 600;
+  font-size: .9rem;
+  transition: all .2s ease;
+}
+.view-tab:hover { border-color: #3b82f6; color: #bfdbfe; }
+.view-tab.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; box-shadow: 0 8px 20px rgba(59,130,246,.25); }
+html:not(.dark) .view-tab { background: #fff; color: #1e293b; border-color: #e2e8f0; }
+html:not(.dark) .view-tab:hover { color: #1d4ed8; border-color: #3b82f6; }
+html:not(.dark) .view-tab.active { background: #1d4ed8; color: #fff; }
+
+.map-container {
+  height: calc(100vh - 200px);
+  min-height: 420px;
+  background: #1e1e1e;
+}
+#telemetryMap {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #1e1e1e;
+}
+
 /* ── Speed cells ────────────────────────────────────────────────────── */
 .speed-cell   { font-variant-numeric:tabular-nums; font-weight:600; font-size:.8rem; white-space:nowrap; }
 .speed-fast   { color:#4ade80; }
@@ -158,4 +187,3 @@ html:not(.dark) .dp-divider { border-top-color:rgba(148,163,184,.18); }
   th:nth-child(8), td:nth-child(8),
   th:nth-child(9), td:nth-child(9) { display:none; }
 }
-
