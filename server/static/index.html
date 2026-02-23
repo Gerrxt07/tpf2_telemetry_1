@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TPF2 Echtzeit-Fahrplan</title>
+  <title>TPF2 Real-Time Telemetry</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -14,113 +14,118 @@
         <span class="logo-icon">🚆</span>
         <div>
           <span class="logo-title">Transport Fever 2</span>
-          <span class="logo-sub">Echtzeit-Fahrplan</span>
+          <span class="logo-sub" data-i18n="subtitle">Echtzeit-Fahrplan</span>
         </div>
       </div>
       <div class="status-bar">
         <div class="status-badge" id="conn-badge">
           <span class="dot" id="conn-dot"></span>
-          <span id="conn-label">Verbinde…</span>
+          <span id="conn-label" data-i18n="connecting">Verbinde…</span>
         </div>
-        <div class="gametime" id="game-time-box" title="Spielzeit">🕐 –</div>
+        <div class="gametime" id="game-time-box" title="Game time">🕐 –</div>
         <div class="last-update" id="last-update-box">–</div>
+        <div class="header-controls">
+          <button id="lang-toggle" class="icon-btn" title="Switch language">DE</button>
+          <button id="theme-toggle" class="icon-btn" title="Toggle theme">🌙</button>
+        </div>
       </div>
     </div>
   </header>
 
-  <!-- ── Stat-Karten ───────────────────────────────────────────── -->
+  <!-- ── Stat cards ──────────────────────────────────────────────── -->
   <section class="stats-row" id="stats-row">
     <div class="stat-card" id="sc-vehicles">
       <div class="sc-value" id="sv-vehicles">–</div>
-      <div class="sc-label">Fahrzeuge</div>
+      <div class="sc-label" data-i18n="vehicles">Fahrzeuge</div>
     </div>
     <div class="stat-card" id="sc-passengers">
       <div class="sc-value" id="sv-passengers">–</div>
-      <div class="sc-label">Passagiere gesamt</div>
+      <div class="sc-label" data-i18n="passengers">Passagiere gesamt</div>
     </div>
     <div class="stat-card">
       <div class="sc-value" id="sv-lines">–</div>
-      <div class="sc-label">Linien</div>
+      <div class="sc-label" data-i18n="lines">Linien</div>
     </div>
     <div class="stat-card">
       <div class="sc-value" id="sv-stations">–</div>
-      <div class="sc-label">Stationen</div>
+      <div class="sc-label" data-i18n="stations">Stationen</div>
     </div>
   </section>
 
-  <!-- ── Filter & Suche ───────────────────────────────────────── -->
+  <!-- ── Filter & search ─────────────────────────────────────────── -->
   <section class="filter-bar">
-    <input type="text" id="search-input" placeholder="🔍  Fahrzeug / Linie / Station suchen…" />
+    <input type="text" id="search-input" placeholder="🔍  Fahrzeug / Linie / Station suchen…" data-i18n-placeholder="searchPlaceholder" />
     <div class="filter-pills" id="type-filter">
-      <button class="pill active" data-type="ALL">Alle</button>
-      <button class="pill" data-type="RAIL">🚆 Zug</button>
-      <button class="pill" data-type="ROAD">🚌 Bus</button>
-      <button class="pill" data-type="TRAM">🚋 Tram</button>
-      <button class="pill" data-type="WATER">⛴ Schiff</button>
-      <button class="pill" data-type="AIR">✈ Flugzeug</button>
+      <button class="pill active" data-type="ALL" data-i18n="all">Alle</button>
+      <button class="pill" data-type="RAIL" data-i18n="train">🚆 Zug</button>
+      <button class="pill" data-type="ROAD" data-i18n="bus">🚌 Bus</button>
+      <button class="pill" data-type="TRAM" data-i18n="tram">🚋 Tram</button>
+      <button class="pill" data-type="WATER" data-i18n="ship">⛴ Schiff</button>
+      <button class="pill" data-type="AIR" data-i18n="plane">✈ Flugzeug</button>
     </div>
     <select id="sort-select">
-      <option value="name">Sortierung: Name (Fahrzeug)</option>
-      <option value="speed">Sortierung: Geschwindigkeit</option>
-      <option value="passengers">Sortierung: Passagiere</option>
-      <option value="type">Sortierung: Typ</option>
-      <option value="state">Sortierung: Zustand</option>
-      <option value="last_stop">Sortierung: Letzter Halt</option>
-      <option value="next_stop">Sortierung: Nächster Halt</option>
-      <option value="occupancy">Sortierung: Auslastung</option>
-      <option value="line">Sortierung: Linie</option>
+      <option value="name"       data-i18n="sortName">Sortierung: Name (Fahrzeug)</option>
+      <option value="speed"      data-i18n="sortSpeed">Sortierung: Geschwindigkeit</option>
+      <option value="passengers" data-i18n="sortPassengers">Sortierung: Passagiere</option>
+      <option value="type"       data-i18n="sortType">Sortierung: Typ</option>
+      <option value="state"      data-i18n="sortState">Sortierung: Zustand</option>
+      <option value="last_stop"  data-i18n="sortLastStop">Sortierung: Letzter Halt</option>
+      <option value="next_stop"  data-i18n="sortNextStop">Sortierung: Nächster Halt</option>
+      <option value="occupancy"  data-i18n="sortOccupancy">Sortierung: Auslastung</option>
+      <option value="line"       data-i18n="sortLine">Sortierung: Linie</option>
     </select>
+    <button id="export-csv" class="icon-btn" data-i18n="exportCsv">CSV Export</button>
   </section>
 
-  <!-- ── Fahrzeugtabelle ───────────────────────────────────────── -->
+  <!-- ── Vehicle table ───────────────────────────────────────────── -->
   <main>
     <div class="table-wrapper">
       <table id="vehicle-table">
         <thead>
           <tr>
-            <th data-filter-key="name" data-filter-label="Fahrzeug">Fahrzeug</th>
-            <th data-filter-key="type" data-filter-label="Typ">Typ</th>
-            <th data-filter-key="line_name" data-filter-label="Linie">Linie</th>
-            <th data-filter-key="state" data-filter-label="Zustand">Zustand</th>
-            <th>Geschw.</th>
-            <th data-filter-key="last_stop_name" data-filter-label="Letzter Halt">Letzter Halt</th>
-            <th data-filter-key="next_stop_name" data-filter-label="Nächster Halt">Nächster Halt</th>
+            <th data-filter-key="name"           data-i18n="colVehicle">Fahrzeug</th>
+            <th data-filter-key="type"           data-i18n="colType">Typ</th>
+            <th data-filter-key="line_name"      data-i18n="colLine">Linie</th>
+            <th data-filter-key="state"          data-i18n="colState">Zustand</th>
+            <th data-i18n="colSpeed">Geschw.</th>
+            <th data-filter-key="last_stop_name" data-i18n="colLastStop">Letzter Halt</th>
+            <th data-filter-key="next_stop_name" data-i18n="colNextStop">Nächster Halt</th>
             <th>
-              <span title="Passagiere / Kapazität">Pax</span>
+              <span data-i18n="colPax" title="Passengers / Capacity">Pax</span>
             </th>
-            <th>Auslastung</th>
+            <th data-i18n="colOccupancy">Auslastung</th>
           </tr>
           <tr class="col-filter-row">
-            <th><input class="col-filter-input" data-filter-key="name" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="type" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="line_name" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="state" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="name"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="type"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="line_name"      data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="state"          data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
             <th></th>
-            <th><input class="col-filter-input" data-filter-key="last_stop_name" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="next_stop_name" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="last_stop_name" data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+            <th><input class="col-filter-input" data-filter-key="next_stop_name" data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
             <th></th>
             <th></th>
           </tr>
         </thead>
         <tbody id="vehicle-tbody">
-          <tr><td colspan="9" class="empty-row">Warte auf Daten…</td></tr>
+          <tr><td colspan="9" class="empty-row" data-i18n="waitingForData">Warte auf Daten…</td></tr>
         </tbody>
       </table>
     </div>
 
-    <!-- ── Detail-Panel (rechts ausklappen bei Klick) ─────────── -->
+    <!-- ── Detail panel (slide out on row click) ──────────────────── -->
     <div id="detail-panel" class="detail-panel hidden">
-      <button id="detail-close" title="Schließen">✕</button>
+      <button id="detail-close" title="Close">✕</button>
       <h2 id="dp-name">–</h2>
       <div class="dp-grid" id="dp-grid"></div>
     </div>
   </main>
 
-  <!-- ── Footer ────────────────────────────────────────────────── -->
+  <!-- ── Footer ────────────────────────────────────────────────────── -->
   <footer>
-    TPF2 Echtzeit-Telemetrie &nbsp;·&nbsp;
-    <a href="/docs" target="_blank">API-Docs</a> &nbsp;·&nbsp;
-    <a href="/api/telemetry" target="_blank">Raw JSON</a>
+    TPF2 Real-Time Telemetry &nbsp;·&nbsp;
+    <a href="/docs" target="_blank" data-i18n="apiDocs">API Docs</a> &nbsp;·&nbsp;
+    <a href="/api/telemetry" target="_blank" data-i18n="rawJson">Raw JSON</a>
   </footer>
 
   <script src="/static/app.js"></script>

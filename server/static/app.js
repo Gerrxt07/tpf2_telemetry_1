@@ -1,16 +1,201 @@
 /**
- * TPF2 Echtzeit-Telemetrie – Frontend
- * Verbindet sich per WebSocket mit dem FastAPI-Server,
- * rendert die Fahrzeugtabelle und das Detail-Panel live.
+ * TPF2 Real-Time Telemetry – Frontend
+ * Connects via WebSocket to the FastAPI server,
+ * renders the vehicle table and detail panel live.
+ * Supports EN / DE UI language and dark / light theme.
  */
 
 "use strict";
 
-// ─── Konfiguration ───────────────────────────────────────────────────────────
+// ─── Localisation strings ────────────────────────────────────────────────────
+const STRINGS = {
+  de: {
+    subtitle:         "Echtzeit-Fahrplan",
+    connecting:       "Verbinde…",
+    connected:        "Live",
+    disconnected:     "Getrennt",
+    vehicles:         "Fahrzeuge",
+    passengers:       "Passagiere gesamt",
+    lines:            "Linien",
+    stations:         "Stationen",
+    searchPlaceholder:"🔍  Fahrzeug / Linie / Station suchen…",
+    all:              "Alle",
+    train:            "🚆 Zug",
+    bus:              "🚌 Bus",
+    tram:             "🚋 Tram",
+    ship:             "⛴ Schiff",
+    plane:            "✈ Flugzeug",
+    sortName:         "Sortierung: Name (Fahrzeug)",
+    sortSpeed:        "Sortierung: Geschwindigkeit",
+    sortPassengers:   "Sortierung: Passagiere",
+    sortType:         "Sortierung: Typ",
+    sortState:        "Sortierung: Zustand",
+    sortLastStop:     "Sortierung: Letzter Halt",
+    sortNextStop:     "Sortierung: Nächster Halt",
+    sortOccupancy:    "Sortierung: Auslastung",
+    sortLine:         "Sortierung: Linie",
+    colVehicle:       "Fahrzeug",
+    colType:          "Typ",
+    colLine:          "Linie",
+    colState:         "Zustand",
+    colSpeed:         "Geschw.",
+    colLastStop:      "Letzter Halt",
+    colNextStop:      "Nächster Halt",
+    colPax:           "Pax",
+    colOccupancy:     "Auslastung",
+    filterPlaceholder:"Filter…",
+    waitingForData:   "Warte auf Daten…",
+    noResults:        "Keine Ergebnisse für diese Filtereinstellungen.",
+    waitingForVehicles:"Warte auf Fahrzeugdaten…",
+    lastUpdated:      "Aktualisiert: ",
+    justNow:          "gerade eben",
+    secondsAgo:       "vor {n}s",
+    minutesAgo:       "vor {n}min",
+    typeRail:         "🚆 Zug",
+    typeRoad:         "🚌 Bus",
+    typeTram:         "🚋 Tram",
+    typeWater:        "⛴ Schiff",
+    typeAir:          "✈ Flug",
+    stateMoving:      "Fährt",
+    stateAtStop:      "Am Halt",
+    stateStopped:     "Gestoppt",
+    stateLoading:     "Beladung",
+    stateUnloading:   "Entladung",
+    stateWaiting:     "Wartet",
+    dpID:             "ID",
+    dpType:           "Typ",
+    dpLine:           "Linie",
+    dpState:          "Zustand",
+    dpSpeed:          "Geschwindigkeit",
+    dpDirection:      "Richtung",
+    dpForward:        "→ vorwärts",
+    dpBackward:       "← rückwärts",
+    dpPassengers:     "Passagiere",
+    dpCargo:          "Fracht",
+    dpLastStop:       "Letzter Halt",
+    dpNextStop:       "Nächster Halt",
+    dpPosX:           "Position X",
+    dpPosY:           "Position Y",
+    dpPosZ:           "Position Z",
+    exportCsv:        "CSV Export",
+    apiDocs:          "API-Docs",
+    rawJson:          "Raw JSON",
+    filterActive:     "Filter aktiv: {v}",
+    filterClick:      "Zum Filterfeld klicken",
+  },
+  en: {
+    subtitle:         "Real-Time Schedule",
+    connecting:       "Connecting…",
+    connected:        "Live",
+    disconnected:     "Disconnected",
+    vehicles:         "Vehicles",
+    passengers:       "Total Passengers",
+    lines:            "Lines",
+    stations:         "Stations",
+    searchPlaceholder:"🔍  Search vehicle / line / station…",
+    all:              "All",
+    train:            "🚆 Train",
+    bus:              "🚌 Bus",
+    tram:             "🚋 Tram",
+    ship:             "⛴ Ship",
+    plane:            "✈ Plane",
+    sortName:         "Sort: Name (Vehicle)",
+    sortSpeed:        "Sort: Speed",
+    sortPassengers:   "Sort: Passengers",
+    sortType:         "Sort: Type",
+    sortState:        "Sort: State",
+    sortLastStop:     "Sort: Last Stop",
+    sortNextStop:     "Sort: Next Stop",
+    sortOccupancy:    "Sort: Occupancy",
+    sortLine:         "Sort: Line",
+    colVehicle:       "Vehicle",
+    colType:          "Type",
+    colLine:          "Line",
+    colState:         "State",
+    colSpeed:         "Speed",
+    colLastStop:      "Last Stop",
+    colNextStop:      "Next Stop",
+    colPax:           "Pax",
+    colOccupancy:     "Occupancy",
+    filterPlaceholder:"Filter…",
+    waitingForData:   "Waiting for data…",
+    noResults:        "No results for the current filter settings.",
+    waitingForVehicles:"Waiting for vehicle data…",
+    lastUpdated:      "Updated: ",
+    justNow:          "just now",
+    secondsAgo:       "{n}s ago",
+    minutesAgo:       "{n}min ago",
+    typeRail:         "🚆 Train",
+    typeRoad:         "🚌 Bus",
+    typeTram:         "🚋 Tram",
+    typeWater:        "⛴ Ship",
+    typeAir:          "✈ Plane",
+    stateMoving:      "Moving",
+    stateAtStop:      "At stop",
+    stateStopped:     "Stopped",
+    stateLoading:     "Loading",
+    stateUnloading:   "Unloading",
+    stateWaiting:     "Waiting",
+    dpID:             "ID",
+    dpType:           "Type",
+    dpLine:           "Line",
+    dpState:          "State",
+    dpSpeed:          "Speed",
+    dpDirection:      "Direction",
+    dpForward:        "→ forward",
+    dpBackward:       "← backward",
+    dpPassengers:     "Passengers",
+    dpCargo:          "Cargo",
+    dpLastStop:       "Last Stop",
+    dpNextStop:       "Next Stop",
+    dpPosX:           "Position X",
+    dpPosY:           "Position Y",
+    dpPosZ:           "Position Z",
+    exportCsv:        "CSV Export",
+    apiDocs:          "API Docs",
+    rawJson:          "Raw JSON",
+    filterActive:     "Filter active: {v}",
+    filterClick:      "Click to focus filter",
+  },
+};
+
+// ─── i18n helpers ────────────────────────────────────────────────────────────
+let _lang = localStorage.getItem("tpf2_lang") || "de";
+
+function t(key, vars) {
+  let str = (STRINGS[_lang] || STRINGS.de)[key] || key;
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      str = str.replace(`{${k}}`, v);
+    }
+  }
+  return str;
+}
+
+function applyI18n() {
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(el => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  // Update <html lang> attribute
+  document.documentElement.lang = _lang;
+}
+
+// ─── Theme ───────────────────────────────────────────────────────────────────
+let _darkMode = localStorage.getItem("tpf2_theme") !== "light";
+
+function applyTheme() {
+  document.documentElement.classList.toggle("light", !_darkMode);
+  themeToggle.textContent = _darkMode ? "☀️" : "🌙";
+}
+
+// ─── Configuration ───────────────────────────────────────────────────────────
 const WS_URL    = `ws://${location.host}/ws`;
 const RECONNECT_DELAY_MS = 3000;
 
-// ─── Zustand ─────────────────────────────────────────────────────────────────
+// ─── State ───────────────────────────────────────────────────────────────────
 let _state = {
   vehicles:  [],
   lines:     [],
@@ -37,7 +222,7 @@ let _columnFilters = {
   next_stop_name: "",
 };
 
-// ─── DOM-Referenzen ──────────────────────────────────────────────────────────
+// ─── DOM references ──────────────────────────────────────────────────────────
 const connDot      = document.getElementById("conn-dot");
 const connLabel    = document.getElementById("conn-label");
 const gameTimeBox  = document.getElementById("game-time-box");
@@ -48,18 +233,26 @@ const dpName       = document.getElementById("dp-name");
 const dpGrid       = document.getElementById("dp-grid");
 const searchInput  = document.getElementById("search-input");
 const sortSelect   = document.getElementById("sort-select");
+const langToggle   = document.getElementById("lang-toggle");
+const themeToggle  = document.getElementById("theme-toggle");
 
-// ─── Hilfsfunktionen ─────────────────────────────────────────────────────────
+// ─── Utility functions ───────────────────────────────────────────────────────
 const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 
 function fmtSpeed(kmh) {
-  if (kmh === 0 || kmh == null) return '<span class="speed-slow">0 km/h</span>';
+  if (kmh === 0 || kmh == null) return `<span class="speed-slow">0 km/h</span>`;
   const cls = kmh > 180 ? "speed-fast" : kmh > 60 ? "speed-medium" : "speed-slow";
   return `<span class="speed-cell ${cls}">${kmh} km/h</span>`;
 }
 
 function fmtType(type) {
-  const map = { RAIL:"🚆 Zug", ROAD:"🚌 Bus", TRAM:"🚋 Tram", WATER:"⛴ Schiff", AIR:"✈ Flug" };
+  const map = {
+    RAIL:  t("typeRail"),
+    ROAD:  t("typeRoad"),
+    TRAM:  t("typeTram"),
+    WATER: t("typeWater"),
+    AIR:   t("typeAir"),
+  };
   const label = map[type] || type;
   return `<span class="type-badge type-${type}">${esc(label)}</span>`;
 }
@@ -67,16 +260,18 @@ function fmtType(type) {
 function fmtState(state) {
   const raw = String(state || "UNKNOWN").toUpperCase();
   const map = {
-    IN_TRANSIT:  { label: "Fährt", cls: "moving" },
-    EN_ROUTE:    { label: "Fährt", cls: "moving" },
-    AT_TERMINAL: { label: "Am Halt", cls: "stop" },
-    STOPPED:     { label: "Gestoppt", cls: "stopped" },
-    LOADING:     { label: "Beladung", cls: "service" },
-    UNLOADING:   { label: "Entladung", cls: "service" },
-    WAITING:     { label: "Wartet", cls: "idle" },
+    IN_TRANSIT:  { labelKey: "stateMoving",    cls: "moving"  },
+    EN_ROUTE:    { labelKey: "stateMoving",    cls: "moving"  },
+    AT_TERMINAL: { labelKey: "stateAtStop",    cls: "stop"    },
+    STOPPED:     { labelKey: "stateStopped",   cls: "stopped" },
+    LOADING:     { labelKey: "stateLoading",   cls: "service" },
+    UNLOADING:   { labelKey: "stateUnloading", cls: "service" },
+    WAITING:     { labelKey: "stateWaiting",   cls: "idle"    },
   };
-  const meta = map[raw] || { label: raw || "UNKNOWN", cls: "unknown" };
-  return `<span class="state-badge state-${meta.cls}">${esc(meta.label)}</span>`;
+  const meta = map[raw];
+  const label = meta ? t(meta.labelKey) : (raw || "UNKNOWN");
+  const cls   = meta ? meta.cls : "unknown";
+  return `<span class="state-badge state-${cls}">${esc(label)}</span>`;
 }
 
 function fmtOccupancy(pax, cap) {
@@ -102,34 +297,31 @@ function fmtPos(pos) {
 function timeAgo(ts) {
   if (!ts) return "–";
   const delta = Math.round(Date.now() / 1000 - ts);
-  if (delta < 5)  return "gerade eben";
-  if (delta < 60) return `vor ${delta}s`;
-  return `vor ${Math.round(delta/60)}min`;
+  if (delta < 5)  return t("justNow");
+  if (delta < 60) return t("secondsAgo", { n: delta });
+  return t("minutesAgo", { n: Math.round(delta / 60) });
 }
 
 function fmtGameTime(gt) {
   if (!gt) return "–";
-  
+
   if (typeof gt === "number") {
-    return `Spielzeit: ${gt}`;
+    return `${gt}`;
   }
-  
+
   if (typeof gt === "object") {
-    // TPF2 packt das Datum in ein "date"-Unterobjekt
     const dateObj = gt.date || gt;
     const { year, month, day, hour, minute } = dateObj;
-    
+
     if (year != null) {
       const m = String(month||1).padStart(2,"0");
       const d = String(day||1).padStart(2,"0");
-      
-      // TPF2 liefert standardmäßig keine Uhrzeit mit, wir blenden sie aus, wenn sie fehlt
+
       if (hour != null || minute != null) {
-          const h = String(hour||0).padStart(2,"0");
-          const min = String(minute||0).padStart(2,"0");
-          return `🕐 ${year}-${m}-${d} ${h}:${min}`;
+        const h   = String(hour||0).padStart(2,"0");
+        const min = String(minute||0).padStart(2,"0");
+        return `🕐 ${year}-${m}-${d} ${h}:${min}`;
       }
-      
       return `📅 ${d}.${m}.${year}`;
     }
   }
@@ -164,9 +356,9 @@ function getVehicleType(v) {
 }
 
 function resolveStopName(v, which) {
-  const idKey = which === "last" ? "last_stop_id" : "next_stop_id";
-  const nameKey = which === "last" ? "last_stop_name" : "next_stop_name";
-  const stopId = Number(v[idKey] || 0);
+  const idKey   = which === "last" ? "last_stop_id"   : "next_stop_id";
+  const nameKey = which === "last" ? "last_stop_name"  : "next_stop_name";
+  const stopId  = Number(v[idKey] || 0);
   const rawName = (v[nameKey] || "").trim();
 
   if (rawName && !isPlaceholderStopName(rawName)) return rawName;
@@ -183,16 +375,14 @@ function resolveStopName(v, which) {
   return rawName || (stopId ? `Stop #${stopId}` : "–");
 }
 
-// ─── Filterung & Sortierung ──────────────────────────────────────────────────
+// ─── Filtering & sorting ─────────────────────────────────────────────────────
 function filteredVehicles() {
   let list = _state.vehicles || [];
 
-  // Typ-Filter
   if (_filterType !== "ALL") {
     list = list.filter(v => getVehicleType(v) === _filterType);
   }
 
-  // Suche
   if (_searchQuery) {
     const q = _searchQuery.toLowerCase();
     list = list.filter(v =>
@@ -203,7 +393,6 @@ function filteredVehicles() {
     );
   }
 
-  // Spalten-Filter
   if (_columnFilters.name) {
     const q = _columnFilters.name.toLowerCase();
     list = list.filter(v => (v.name || "").toLowerCase().includes(q));
@@ -229,7 +418,6 @@ function filteredVehicles() {
     list = list.filter(v => resolveStopName(v, "next").toLowerCase().includes(q));
   }
 
-  // Sortierung
   list = [...list].sort((a, b) => {
     const aOcc = (a.capacity || 0) > 0 ? (a.passengers || 0) / a.capacity : -1;
     const bOcc = (b.capacity || 0) > 0 ? (b.passengers || 0) / b.capacity : -1;
@@ -238,7 +426,6 @@ function filteredVehicles() {
       case "speed":      return (b.speed_kmh || 0) - (a.speed_kmh || 0);
       case "passengers": return (b.passengers || 0) - (a.passengers || 0);
       case "type": {
-        // Typ-Sortierung nur sinnvoll bei "Alle"; bei aktivem Typ-Filter fallback auf Name
         if (_filterType === "ALL") {
           return getVehicleType(a).localeCompare(getVehicleType(b)) ||
                  (a.name || "").localeCompare(b.name || "");
@@ -266,16 +453,16 @@ function filteredVehicles() {
 
 function updateHeaderFilterIndicators() {
   document.querySelectorAll("th[data-filter-key]").forEach(th => {
-    const key = th.dataset.filterKey;
+    const key    = th.dataset.filterKey;
     const active = Boolean(_columnFilters[key]);
     th.classList.toggle("filtered", active);
     th.title = active
-      ? `Filter aktiv: ${_columnFilters[key]}`
-      : "Zum Filterfeld klicken";
+      ? t("filterActive", { v: _columnFilters[key] })
+      : t("filterClick");
   });
 
   document.querySelectorAll(".col-filter-input[data-filter-key]").forEach(input => {
-    const key = input.dataset.filterKey;
+    const key     = input.dataset.filterKey;
     const current = _columnFilters[key] || "";
     if (input.value !== current) input.value = current;
   });
@@ -290,7 +477,7 @@ function renderStats() {
   document.getElementById("sv-stations").textContent   = s.total_stations   ?? "–";
 
   if (_state.timestamp) {
-    lastUpdateBox.textContent = "Aktualisiert: " + timeAgo(_state.timestamp);
+    lastUpdateBox.textContent = t("lastUpdated") + timeAgo(_state.timestamp);
   }
   if (_state.game_time) {
     gameTimeBox.textContent = fmtGameTime(_state.game_time);
@@ -302,33 +489,30 @@ function renderTable() {
   const list = filteredVehicles();
   if (list.length === 0) {
     tbody.innerHTML = `<tr><td colspan="9" class="empty-row">
-      ${_searchQuery || _filterType !== "ALL" ? "Keine Ergebnisse für diese Filtereinstellungen." : "Warte auf Fahrzeugdaten…"}
+      ${_searchQuery || _filterType !== "ALL" ? t("noResults") : t("waitingForVehicles")}
     </td></tr>`;
     return;
   }
 
-  // Leere/Placeholder-Zeilen entfernen, wenn echte Daten vorhanden sind
   for (const row of tbody.querySelectorAll("tr:not([data-vid])")) {
     row.remove();
   }
 
-  // Effizientes Diff-Update: nur geänderte Zeilen neu rendern
   const existing = new Map();
   for (const row of tbody.querySelectorAll("tr[data-vid]")) {
     existing.set(String(row.dataset.vid), row);
   }
 
-  const seen = new Set();
-  let cursor = tbody.firstElementChild;
+  const seen   = new Set();
+  let   cursor = tbody.firstElementChild;
 
   for (const v of list) {
-    const vid = String(v.id);
+    const vid          = String(v.id);
     seen.add(vid);
-    const vType = getVehicleType(v);
+    const vType        = getVehicleType(v);
     const lastStopName = resolveStopName(v, "last");
     const nextStopName = resolveStopName(v, "next");
 
-    const pct = v.capacity > 0 ? Math.round(v.passengers / v.capacity * 100) : 0;
     const rowHTML = `
       <td class="vname" title="${esc(v.name)}">${esc(v.name)}</td>
       <td>${fmtType(vType || "UNKNOWN")}</td>
@@ -343,7 +527,6 @@ function renderTable() {
 
     let row = existing.get(vid);
     if (row) {
-      // Prüfen ob sich etwas geändert hat
       const newInner = rowHTML.trim();
       if (row.innerHTML.trim() !== newInner) {
         row.innerHTML = rowHTML;
@@ -351,14 +534,13 @@ function renderTable() {
     } else {
       row = document.createElement("tr");
       row.dataset.vid = vid;
-      row.innerHTML = rowHTML;
+      row.innerHTML   = rowHTML;
       row.addEventListener("click", () => openDetail(vid));
     }
 
     if (String(vid) === String(_selectedVid)) row.classList.add("selected");
     else row.classList.remove("selected");
 
-    // Nur verschieben, wenn wirklich nötig (verhindert unnötiges "Neu"-Verhalten)
     if (row === cursor) {
       cursor = cursor ? cursor.nextElementSibling : null;
     } else {
@@ -366,13 +548,12 @@ function renderTable() {
     }
   }
 
-  // Entferne Zeilen, die nicht mehr sichtbar sind
   for (const [vid, row] of existing) {
     if (!seen.has(vid)) row.remove();
   }
 }
 
-// ─── Detail-Panel ────────────────────────────────────────────────────────────
+// ─── Detail panel ─────────────────────────────────────────────────────────────
 function openDetail(vid, rerenderTable = true) {
   const vidKey = String(vid);
   const v = (_state.vehicles || []).find(x => String(x.id) === vidKey);
@@ -387,23 +568,23 @@ function openDetail(vid, rerenderTable = true) {
   const nextStopName = resolveStopName(v, "next");
 
   const rows = [
-    ["ID",            v.id],
-    ["Typ",           getVehicleType(v)],
-    ["Linie",         v.line_name || `#${v.line_id}`],
-    ["Zustand",       v.state],
-    null, // divider
-    ["Geschwindigkeit", `${v.speed_kmh} km/h (${v.speed_ms} m/s)`],
-    ["Richtung",      v.direction === 1 ? "→ vorwärts" : "← rückwärts"],
+    [t("dpID"),    v.id],
+    [t("dpType"),  getVehicleType(v)],
+    [t("dpLine"),  v.line_name || `#${v.line_id}`],
+    [t("dpState"), v.state],
     null,
-    ["Passagiere",    `${v.passengers} / ${v.capacity || "?"}`],
-    v.cargo_capacity > 0 ? ["Fracht", `${v.cargo} / ${v.cargo_capacity}`] : null,
+    [t("dpSpeed"),     `${v.speed_kmh} km/h (${v.speed_ms} m/s)`],
+    [t("dpDirection"), v.direction === 1 ? t("dpForward") : t("dpBackward")],
     null,
-    ["Letzter Halt",  lastStopName || `#${v.last_stop_id}`],
-    ["Nächster Halt", nextStopName || `#${v.next_stop_id}`],
+    [t("dpPassengers"), `${v.passengers} / ${v.capacity || "?"}`],
+    v.cargo_capacity > 0 ? [t("dpCargo"), `${v.cargo} / ${v.cargo_capacity}`] : null,
     null,
-    ["Position X",    v.position ? v.position.x : "–"],
-    ["Position Y",    v.position ? v.position.y : "–"],
-    ["Position Z",    v.position ? v.position.z : "–"],
+    [t("dpLastStop"), lastStopName || `#${v.last_stop_id}`],
+    [t("dpNextStop"), nextStopName || `#${v.next_stop_id}`],
+    null,
+    [t("dpPosX"), v.position ? v.position.x : "–"],
+    [t("dpPosY"), v.position ? v.position.y : "–"],
+    [t("dpPosZ"), v.position ? v.position.z : "–"],
   ];
 
   let html = "";
@@ -417,7 +598,6 @@ function openDetail(vid, rerenderTable = true) {
   }
   dpGrid.innerHTML = html;
 
-  // Aktive Zeile in Tabelle markieren
   if (rerenderTable) renderTable();
 }
 
@@ -427,7 +607,48 @@ document.getElementById("detail-close").addEventListener("click", () => {
   renderTable();
 });
 
-// ─── Filter-Events ───────────────────────────────────────────────────────────
+// ─── CSV export ──────────────────────────────────────────────────────────────
+function exportCSV() {
+  const list = filteredVehicles();
+  const headers = [
+    "ID", "Name", "Type", "Line", "State",
+    "Speed (km/h)", "Last Stop", "Next Stop",
+    "Passengers", "Capacity", "Cargo", "Cargo Capacity",
+    "Position X", "Position Y", "Position Z",
+  ];
+  const rows = list.map(v => [
+    v.id,
+    v.name,
+    getVehicleType(v),
+    v.line_name || "",
+    v.state,
+    v.speed_kmh,
+    resolveStopName(v, "last"),
+    resolveStopName(v, "next"),
+    v.passengers,
+    v.capacity,
+    v.cargo,
+    v.cargo_capacity,
+    v.position ? v.position.x : "",
+    v.position ? v.position.y : "",
+    v.position ? v.position.z : "",
+  ]);
+
+  const csvLines = [headers, ...rows].map(row =>
+    row.map(cell => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(",")
+  );
+  const blob = new Blob([csvLines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `tpf2_telemetry_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById("export-csv").addEventListener("click", exportCSV);
+
+// ─── Filter events ────────────────────────────────────────────────────────────
 document.getElementById("type-filter").addEventListener("click", e => {
   const pill = e.target.closest(".pill");
   if (!pill) return;
@@ -440,7 +661,7 @@ document.getElementById("type-filter").addEventListener("click", e => {
 document.querySelector("#vehicle-table thead").addEventListener("click", e => {
   const th = e.target.closest("th[data-filter-key]");
   if (!th) return;
-  const key = th.dataset.filterKey;
+  const key   = th.dataset.filterKey;
   const input = document.querySelector(`.col-filter-input[data-filter-key="${key}"]`);
   if (input) input.focus();
 });
@@ -464,16 +685,38 @@ sortSelect.addEventListener("change", () => {
   renderTable();
 });
 
-// ─── WebSocket-Verbindung ────────────────────────────────────────────────────
+// ─── Language & theme controls ───────────────────────────────────────────────
+langToggle.addEventListener("click", () => {
+  _lang = _lang === "de" ? "en" : "de";
+  localStorage.setItem("tpf2_lang", _lang);
+  langToggle.textContent = _lang.toUpperCase();
+  applyI18n();
+  // Re-render dynamic content that uses t()
+  renderStats();
+  renderTable();
+  updateHeaderFilterIndicators();
+  if (_selectedVid != null) openDetail(_selectedVid, false);
+});
+
+themeToggle.addEventListener("click", () => {
+  _darkMode = !_darkMode;
+  localStorage.setItem("tpf2_theme", _darkMode ? "dark" : "light");
+  applyTheme();
+});
+
+// ─── WebSocket connection ─────────────────────────────────────────────────────
 function setConnState(state) {
-  // state: "connecting" | "connected" | "disconnected"
   connDot.className = "dot " + state;
-  const labels = { connecting: "Verbinde…", connected: "Live", disconnected: "Getrennt" };
+  const labels = {
+    connecting:   t("connecting"),
+    connected:    t("connected"),
+    disconnected: t("disconnected"),
+  };
   connLabel.textContent = labels[state] || state;
 }
 
 function connectWS() {
-  if (_ws && _ws.readyState <= 1) return; // bereits verbunden / verbindend
+  if (_ws && _ws.readyState <= 1) return;
   setConnState("connecting");
 
   _ws = new WebSocket(WS_URL);
@@ -486,21 +729,19 @@ function connectWS() {
   _ws.onmessage = evt => {
     try {
       const data = JSON.parse(evt.data);
-      // Keepalive-Ping ignorieren
       if (data.type === "ping") return;
       _state = data;
       rebuildIndexes();
       renderStats();
       renderTable();
-      // Detail-Panel aktualisieren falls offen
       if (_selectedVid != null) openDetail(_selectedVid, false);
     } catch (e) {
-      console.warn("WebSocket-Parsefehler:", e);
+      console.warn("WebSocket parse error:", e);
     }
   };
 
   _ws.onerror = err => {
-    console.warn("WebSocket-Fehler:", err);
+    console.warn("WebSocket error:", err);
   };
 
   _ws.onclose = () => {
@@ -512,9 +753,14 @@ function connectWS() {
   };
 }
 
-// ─── Init ────────────────────────────────────────────────────────────────────
+// ─── Init ─────────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
-  // Initialen Datenabruf über REST (falls WS noch nicht bereit)
+  // Apply saved preferences
+  langToggle.textContent = _lang.toUpperCase();
+  applyTheme();
+  applyI18n();
+
+  // Initial REST fetch (in case WS is not ready yet)
   fetch("/api/telemetry")
     .then(r => r.json())
     .then(data => {
@@ -527,14 +773,13 @@ document.addEventListener("DOMContentLoaded", () => {
     })
     .catch(() => {});
 
-  // WebSocket starten
   connectWS();
   updateHeaderFilterIndicators();
 
-  // Statusleiste jede Sekunde aktualisieren (Zeitanzeige)
+  // Update "last updated" label every second
   setInterval(() => {
     if (_state.timestamp) {
-      lastUpdateBox.textContent = "Aktualisiert: " + timeAgo(_state.timestamp);
+      lastUpdateBox.textContent = t("lastUpdated") + timeAgo(_state.timestamp);
     }
   }, 1000);
 });
