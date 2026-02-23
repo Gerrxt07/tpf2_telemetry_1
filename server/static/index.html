@@ -1,133 +1,211 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="de" class="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TPF2 Real-Time Telemetry</title>
+  <!-- Tailwind CSS Play CDN -->
+  <script>tailwind={config:{darkMode:"class"}}</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons (UMD) -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body>
-  <!-- ── Header ─────────────────────────────────────────────────── -->
-  <header>
-    <div class="header-inner">
-      <div class="logo">
-        <span class="logo-icon">🚆</span>
-        <div>
-          <span class="logo-title">Transport Fever 2</span>
-          <span class="logo-sub" data-i18n="subtitle">Echtzeit-Fahrplan</span>
+<body class="bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 min-h-screen antialiased">
+
+  <!-- ── Header ──────────────────────────────────────────────────────── -->
+  <header class="sticky top-0 z-50 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md">
+    <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-4">
+
+      <!-- Logo -->
+      <div class="flex items-center gap-2.5 shrink-0">
+        <div class="w-8 h-8 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/25">
+          <i data-lucide="train-front" class="w-4 h-4 text-white"></i>
+        </div>
+        <div class="leading-tight">
+          <div class="font-semibold text-sm">Transport Fever 2</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400" data-i18n="subtitle">Real-Time Schedule</div>
         </div>
       </div>
-      <div class="status-bar">
-        <div class="status-badge" id="conn-badge">
-          <span class="dot" id="conn-dot"></span>
-          <span id="conn-label" data-i18n="connecting">Verbinde…</span>
+
+      <!-- Right side controls -->
+      <div class="flex items-center gap-2">
+        <!-- Game time (shown by JS when data arrives) -->
+        <div class="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400" id="game-time-box" style="display:none">
+          <i data-lucide="calendar" class="w-3.5 h-3.5 shrink-0"></i>
+          <span id="game-time-text">–</span>
         </div>
-        <div class="gametime" id="game-time-box" title="Game time">🕐 –</div>
-        <div class="last-update" id="last-update-box">–</div>
-        <div class="header-controls">
-          <button id="lang-toggle" class="icon-btn" title="Switch language">DE</button>
-          <button id="theme-toggle" class="icon-btn" title="Toggle theme">🌙</button>
+        <!-- Last update -->
+        <div class="hidden md:flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400" id="last-update-box">
+          <i data-lucide="clock" class="w-3.5 h-3.5 shrink-0"></i>
+          <span id="last-update-text">–</span>
         </div>
+        <!-- Connection badge -->
+        <div id="conn-badge" class="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-slate-200 dark:border-slate-700 text-xs bg-white dark:bg-slate-900">
+          <span id="conn-dot" class="w-1.5 h-1.5 rounded-full"></span>
+          <span id="conn-label" data-i18n="connecting">Connecting…</span>
+        </div>
+        <!-- Language toggle -->
+        <button id="lang-toggle"
+          class="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+          title="Switch language">DE</button>
+        <!-- Theme toggle -->
+        <button id="theme-toggle"
+          class="p-1.5 rounded-lg text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-base leading-none"
+          title="Toggle theme">☀️</button>
       </div>
     </div>
   </header>
 
-  <!-- ── Stat cards ──────────────────────────────────────────────── -->
-  <section class="stats-row" id="stats-row">
-    <div class="stat-card" id="sc-vehicles">
-      <div class="sc-value" id="sv-vehicles">–</div>
-      <div class="sc-label" data-i18n="vehicles">Fahrzeuge</div>
-    </div>
-    <div class="stat-card" id="sc-passengers">
-      <div class="sc-value" id="sv-passengers">–</div>
-      <div class="sc-label" data-i18n="passengers">Passagiere gesamt</div>
-    </div>
-    <div class="stat-card">
-      <div class="sc-value" id="sv-lines">–</div>
-      <div class="sc-label" data-i18n="lines">Linien</div>
-    </div>
-    <div class="stat-card">
-      <div class="sc-value" id="sv-stations">–</div>
-      <div class="sc-label" data-i18n="stations">Stationen</div>
-    </div>
-  </section>
+  <div class="max-w-screen-2xl mx-auto px-4 sm:px-6 py-5 space-y-4">
 
-  <!-- ── Filter & search ─────────────────────────────────────────── -->
-  <section class="filter-bar">
-    <input type="text" id="search-input" placeholder="🔍  Fahrzeug / Linie / Station suchen…" data-i18n-placeholder="searchPlaceholder" />
-    <div class="filter-pills" id="type-filter">
-      <button class="pill active" data-type="ALL" data-i18n="all">Alle</button>
-      <button class="pill" data-type="RAIL" data-i18n="train">🚆 Zug</button>
-      <button class="pill" data-type="ROAD" data-i18n="bus">🚌 Bus</button>
-      <button class="pill" data-type="TRAM" data-i18n="tram">🚋 Tram</button>
-      <button class="pill" data-type="WATER" data-i18n="ship">⛴ Schiff</button>
-      <button class="pill" data-type="AIR" data-i18n="plane">✈ Flugzeug</button>
-    </div>
-    <select id="sort-select">
-      <option value="name"       data-i18n="sortName">Sortierung: Name (Fahrzeug)</option>
-      <option value="speed"      data-i18n="sortSpeed">Sortierung: Geschwindigkeit</option>
-      <option value="passengers" data-i18n="sortPassengers">Sortierung: Passagiere</option>
-      <option value="type"       data-i18n="sortType">Sortierung: Typ</option>
-      <option value="state"      data-i18n="sortState">Sortierung: Zustand</option>
-      <option value="last_stop"  data-i18n="sortLastStop">Sortierung: Letzter Halt</option>
-      <option value="next_stop"  data-i18n="sortNextStop">Sortierung: Nächster Halt</option>
-      <option value="occupancy"  data-i18n="sortOccupancy">Sortierung: Auslastung</option>
-      <option value="line"       data-i18n="sortLine">Sortierung: Linie</option>
-    </select>
-    <button id="export-csv" class="icon-btn" data-i18n="exportCsv">CSV Export</button>
-  </section>
+    <!-- ── Stats ──────────────────────────────────────────────────────── -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3" id="stats-row">
 
-  <!-- ── Vehicle table ───────────────────────────────────────────── -->
-  <main>
-    <div class="table-wrapper">
-      <table id="vehicle-table">
-        <thead>
-          <tr>
-            <th data-filter-key="name"           data-i18n="colVehicle">Fahrzeug</th>
-            <th data-filter-key="type"           data-i18n="colType">Typ</th>
-            <th data-filter-key="line_name"      data-i18n="colLine">Linie</th>
-            <th data-filter-key="state"          data-i18n="colState">Zustand</th>
-            <th data-i18n="colSpeed">Geschw.</th>
-            <th data-filter-key="last_stop_name" data-i18n="colLastStop">Letzter Halt</th>
-            <th data-filter-key="next_stop_name" data-i18n="colNextStop">Nächster Halt</th>
-            <th>
-              <span data-i18n="colPax" title="Passengers / Capacity">Pax</span>
-            </th>
-            <th data-i18n="colOccupancy">Auslastung</th>
-          </tr>
-          <tr class="col-filter-row">
-            <th><input class="col-filter-input" data-filter-key="name"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="type"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="line_name"      data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="state"          data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
-            <th></th>
-            <th><input class="col-filter-input" data-filter-key="last_stop_name" data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
-            <th><input class="col-filter-input" data-filter-key="next_stop_name" data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
-            <th></th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="vehicle-tbody">
-          <tr><td colspan="9" class="empty-row" data-i18n="waitingForData">Warte auf Daten…</td></tr>
-        </tbody>
-      </table>
+      <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-blue-400/60 dark:hover:border-blue-500/50 transition-colors duration-200 cursor-default">
+        <div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-vehicles">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="vehicles">Vehicles</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors shrink-0">
+          <i data-lucide="train-front" class="w-5 h-5 text-blue-500"></i>
+        </div>
+      </div>
+
+      <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-emerald-400/60 dark:hover:border-emerald-500/50 transition-colors duration-200 cursor-default">
+        <div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-passengers">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="passengers">Passengers</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center group-hover:bg-emerald-500/20 transition-colors shrink-0">
+          <i data-lucide="users" class="w-5 h-5 text-emerald-500"></i>
+        </div>
+      </div>
+
+      <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-violet-400/60 dark:hover:border-violet-500/50 transition-colors duration-200 cursor-default">
+        <div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-lines">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="lines">Lines</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-violet-500/10 flex items-center justify-center group-hover:bg-violet-500/20 transition-colors shrink-0">
+          <i data-lucide="route" class="w-5 h-5 text-violet-500"></i>
+        </div>
+      </div>
+
+      <div class="stat-card rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 flex items-start justify-between group hover:border-amber-400/60 dark:hover:border-amber-500/50 transition-colors duration-200 cursor-default">
+        <div>
+          <div class="text-3xl font-bold tabular-nums text-slate-900 dark:text-white leading-none" id="sv-stations">–</div>
+          <div class="text-[11px] text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-1.5 font-medium" data-i18n="stations">Stations</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center group-hover:bg-amber-500/20 transition-colors shrink-0">
+          <i data-lucide="map-pin" class="w-5 h-5 text-amber-500"></i>
+        </div>
+      </div>
     </div>
 
-    <!-- ── Detail panel (slide out on row click) ──────────────────── -->
-    <div id="detail-panel" class="detail-panel hidden">
-      <button id="detail-close" title="Close">✕</button>
-      <h2 id="dp-name">–</h2>
-      <div class="dp-grid" id="dp-grid"></div>
+    <!-- ── Filter bar ─────────────────────────────────────────────────── -->
+    <div class="flex flex-wrap items-center gap-2.5">
+      <!-- Global search -->
+      <div class="relative flex-1 min-w-[180px]">
+        <i data-lucide="search" class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 dark:text-slate-500 pointer-events-none"></i>
+        <input type="text" id="search-input"
+          class="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400 dark:focus:border-blue-500 transition-all"
+          placeholder="Search…" data-i18n-placeholder="searchPlaceholder" />
+      </div>
+      <!-- Type pills -->
+      <div class="flex items-center gap-1.5 flex-wrap" id="type-filter">
+        <button class="pill active text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="ALL" data-i18n="all">All</button>
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="RAIL" data-i18n="train">🚆 Train</button>
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="ROAD" data-i18n="bus">🚌 Bus</button>
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="TRAM" data-i18n="tram">🚋 Tram</button>
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="WATER" data-i18n="ship">⛴ Ship</button>
+        <button class="pill text-xs px-3 py-1.5 rounded-full border font-medium transition-all" data-type="AIR" data-i18n="plane">✈ Plane</button>
+      </div>
+      <!-- Sort select -->
+      <select id="sort-select"
+        class="text-sm px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500/40 cursor-pointer">
+        <option value="name"       data-i18n="sortName">Sort: Name</option>
+        <option value="speed"      data-i18n="sortSpeed">Sort: Speed</option>
+        <option value="passengers" data-i18n="sortPassengers">Sort: Passengers</option>
+        <option value="type"       data-i18n="sortType">Sort: Type</option>
+        <option value="state"      data-i18n="sortState">Sort: State</option>
+        <option value="last_stop"  data-i18n="sortLastStop">Sort: Last Stop</option>
+        <option value="next_stop"  data-i18n="sortNextStop">Sort: Next Stop</option>
+        <option value="occupancy"  data-i18n="sortOccupancy">Sort: Occupancy</option>
+        <option value="line"       data-i18n="sortLine">Sort: Line</option>
+      </select>
+      <!-- CSV export -->
+      <button id="export-csv"
+        class="flex items-center gap-1.5 text-sm px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 hover:border-slate-300 dark:hover:border-slate-600 transition-all">
+        <i data-lucide="download" class="w-4 h-4"></i>
+        <span data-i18n="exportCsv">CSV Export</span>
+      </button>
     </div>
-  </main>
 
-  <!-- ── Footer ────────────────────────────────────────────────────── -->
-  <footer>
+    <!-- ── Table + Detail Panel ───────────────────────────────────────── -->
+    <div class="flex gap-4 items-start">
+
+      <!-- Table -->
+      <div class="flex-1 min-w-0 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
+        <div class="overflow-x-auto">
+          <table id="vehicle-table" class="w-full">
+            <thead>
+              <tr class="border-b border-slate-200 dark:border-slate-800">
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-slate-900 dark:hover:text-white transition-colors select-none" data-filter-key="name"           data-i18n="colVehicle">Vehicle</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-slate-900 dark:hover:text-white transition-colors select-none" data-filter-key="type"           data-i18n="colType">Type</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-slate-900 dark:hover:text-white transition-colors select-none" data-filter-key="line_name"      data-i18n="colLine">Line</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-slate-900 dark:hover:text-white transition-colors select-none" data-filter-key="state"          data-i18n="colState">State</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap select-none"                                                                                                              data-i18n="colSpeed">Speed</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-slate-900 dark:hover:text-white transition-colors select-none" data-filter-key="last_stop_name" data-i18n="colLastStop">Last Stop</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-slate-900 dark:hover:text-white transition-colors select-none" data-filter-key="next_stop_name" data-i18n="colNextStop">Next Stop</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap select-none"                                                                                                              data-i18n="colPax">Pax</th>
+                <th class="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider whitespace-nowrap select-none"                                                                                                              data-i18n="colOccupancy">Occupancy</th>
+              </tr>
+              <!-- Column filter inputs -->
+              <tr class="border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/70">
+                <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="name"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+                <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="type"           data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+                <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="line_name"      data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+                <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="state"          data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+                <th></th>
+                <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="last_stop_name" data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+                <th class="px-3 py-1.5"><input class="col-filter-input" data-filter-key="next_stop_name" data-i18n-placeholder="filterPlaceholder" placeholder="Filter…" /></th>
+                <th></th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="vehicle-tbody">
+              <tr>
+                <td colspan="9" class="px-4 py-16 text-center text-slate-400 dark:text-slate-500 italic text-sm" data-i18n="waitingForData">Waiting for data…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Detail panel -->
+      <div id="detail-panel" class="hidden w-72 shrink-0 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 self-start sticky top-16">
+        <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2">
+          <h2 id="dp-name" class="font-semibold text-sm text-blue-600 dark:text-blue-400 truncate flex-1">–</h2>
+          <button id="detail-close"
+            class="shrink-0 p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors">
+            <i data-lucide="x" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+        <div id="dp-grid" class="p-4 max-h-[calc(100vh-8rem)] overflow-y-auto"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Footer ────────────────────────────────────────────────────────── -->
+  <footer class="border-t border-slate-200 dark:border-slate-800 mt-8 py-4 text-center text-xs text-slate-400 dark:text-slate-500">
     TPF2 Real-Time Telemetry &nbsp;·&nbsp;
-    <a href="/docs" target="_blank" data-i18n="apiDocs">API Docs</a> &nbsp;·&nbsp;
-    <a href="/api/telemetry" target="_blank" data-i18n="rawJson">Raw JSON</a>
+    <a href="/docs" target="_blank" class="hover:text-blue-500 dark:hover:text-blue-400 transition-colors" data-i18n="apiDocs">API Docs</a>
+    &nbsp;·&nbsp;
+    <a href="/api/telemetry" target="_blank" class="hover:text-blue-500 dark:hover:text-blue-400 transition-colors" data-i18n="rawJson">Raw JSON</a>
   </footer>
 
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>
