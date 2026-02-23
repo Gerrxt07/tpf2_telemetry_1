@@ -48,7 +48,7 @@ mod.lua                             server/server.py (FastAPI)
 ## Data snapshot (telemetry.json)
 The collector currently writes:
 - `schema_version`: 2  
-- `write_count`: increments with every write so you can detect new snapshots even when no wall-clock time is available or `game_time` is unchanged  
+- `write_count`: increments with each write to detect new snapshots (no wall-clock API available)  
 - `game_time`: current game time (from `game.interface` when available)  
 - `stats`: totals for vehicles, passengers, lines, stations, and vehicle counts by type  
 - `vehicles`: per-vehicle state (id, name, type, speed m/s & km/h, passengers/capacity, cargo, line id/name, last & next stop ids/names, position, direction, state)  
