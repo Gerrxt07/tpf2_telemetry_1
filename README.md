@@ -39,7 +39,7 @@ mod.lua                             server/server.py (FastAPI)
    Visit **http://localhost:8765** to see the live map/list once data is present.
 
 ## Configuration (mod parameters)
-- **Write interval (seconds):** `1, 2, 3, 5, 10, 15, 30` (default 2s in the runtime script).
+- **Write interval (seconds):** `1, 2, 3, 5, 10, 15, 30` (runtime script defaults to 2s; UI exposes the same options).
 - **Include cargo vehicles:** on/off.
 - **Include buses/trams:** on/off.
 
@@ -48,7 +48,7 @@ mod.lua                             server/server.py (FastAPI)
 ## Data snapshot (telemetry.json)
 The collector currently writes:
 - `schema_version`: 2  
-- `write_count`: monotonically increasing counter (used instead of real wall-clock time)  
+- `write_count`: monotonically increasing counter (TPF2 sandbox lacks a wall-clock API; this supplements `game_time` when present)  
 - `game_time`: current game time (from `game.interface` when available)  
 - `stats`: totals for vehicles, passengers, lines, stations, and vehicle counts by type  
 - `vehicles`: per-vehicle state (id, name, type, speed m/s & km/h, passengers/capacity, cargo, line id/name, last & next stop ids/names, position, direction, state)  
