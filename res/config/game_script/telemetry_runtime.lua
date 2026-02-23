@@ -61,11 +61,9 @@ function data()
             end
         end,
 
-        -- Regelmaessiger Tick im GUI-State
+        -- GUI-State: nur initialisieren, kein zweiter Tick (vermeidet doppelte Schreibvorgaenge)
         guiUpdate = function()
-            if ensureCollector() and collector and collector.onTick then
-                pcall(collector.onTick, 0.25)
-            end
+            ensureCollector()
         end,
 
         guiInit = function()

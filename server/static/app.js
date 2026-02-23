@@ -1,136 +1,304 @@
 /**
- * TPF2 Echtzeit-Telemetrie – Frontend
- * Verbindet sich per WebSocket mit dem FastAPI-Server,
- * rendert die Fahrzeugtabelle und das Detail-Panel live.
+ * TPF2 Real-Time Telemetry – Frontend (app.js)
+ *
+ * Works in tandem with Alpine.js (store) and HTMX (REST polling fallback):
+ *
+ *  Alpine store  → owns reactive UI state (stats, connState, filterType, …)
+ *  HTMX          → fires /api/telemetry on load + every 5 s as WS fallback
+ *  app.js        → WebSocket, table rendering, filtering/sorting, CSV, i18n
+ *
+ * Public window globals exposed for Alpine / HTMX callbacks:
+ *  window.tpf2Render      – re-render vehicle table
+ *  window.tpf2T           – translation function
+ *  window.tpf2ToggleLang  – toggle DE / EN
+ *  window.tpf2CloseDetail – close detail panel
+ *  window.tpf2HandleData  – process a raw telemetry payload object
+ *  window.tpf2HandleHtmx  – HTMX after-request callback
+ *  window.tpf2WsConnected – boolean, true while WS is open
  */
 
 "use strict";
 
-// ─── Konfiguration ───────────────────────────────────────────────────────────
-const WS_URL    = `ws://${location.host}/ws`;
+// ─── Motion One (CDN) – graceful fallback if offline ─────────────────────────
+let _animate = null;
+let _stagger = null;
+try {
+  const m = await import("https://cdn.jsdelivr.net/npm/motion@11/+esm");
+  _animate = m.animate;
+  _stagger = m.stagger;
+} catch (_) { /* offline – animations disabled */ }
+
+const doAnimate = (...args) => { if (_animate) _animate(...args); };
+
+// Named easing presets for Motion One
+const EASING_SPRING    = [0.34, 1.56, 0.64, 1]; // spring overshoot
+const EASING_OUT_CUBIC = [0.33, 1, 0.68, 1];    // ease-out-cubic
+
+// ─── Alpine store accessor ─────────────────────────────────────────────────
+// Alpine is deferred and guaranteed to be initialized before this module runs.
+const appStore = () => window.Alpine?.store('app');
+
+// ─── Localisation strings ─────────────────────────────────────────────────────
+const STRINGS = {
+  de: {
+    subtitle:          "Echtzeit-Fahrplan",
+    connecting:        "Verbinde…",
+    connected:         "Live",
+    disconnected:      "Getrennt",
+    vehicles:          "Fahrzeuge",
+    passengers:        "Passagiere gesamt",
+    lines:             "Linien",
+    stations:          "Stationen",
+    searchPlaceholder: "🔍  Fahrzeug / Linie / Station suchen…",
+    all:               "Alle",
+    train:             "🚆 Zug",
+    bus:               "🚌 Bus",
+    tram:              "🚋 Tram",
+    ship:              "⛴ Schiff",
+    plane:             "✈ Flugzeug",
+    sortName:          "Sortierung: Name",
+    sortSpeed:         "Sortierung: Geschwindigkeit",
+    sortPassengers:    "Sortierung: Passagiere",
+    sortType:          "Sortierung: Typ",
+    sortState:         "Sortierung: Zustand",
+    sortLastStop:      "Sortierung: Letzter Halt",
+    sortNextStop:      "Sortierung: Nächster Halt",
+    sortOccupancy:     "Sortierung: Auslastung",
+    sortLine:          "Sortierung: Linie",
+    colVehicle:        "Fahrzeug",
+    colType:           "Typ",
+    colLine:           "Linie",
+    colState:          "Zustand",
+    colSpeed:          "Geschw.",
+    colLastStop:       "Letzter Halt",
+    colNextStop:       "Nächster Halt",
+    colPax:            "Pax",
+    colOccupancy:      "Auslastung",
+    filterPlaceholder: "Filter…",
+    waitingForData:    "Warte auf Daten…",
+    noResults:         "Keine Ergebnisse für diese Filtereinstellungen.",
+    waitingForVehicles:"Warte auf Fahrzeugdaten…",
+    lastUpdated:       "Aktualisiert: ",
+    justNow:           "gerade eben",
+    secondsAgo:        "vor {n}s",
+    minutesAgo:        "vor {n}min",
+    typeRail:          "🚆 Zug",
+    typeRoad:          "🚌 Bus",
+    typeTram:          "🚋 Tram",
+    typeWater:         "⛴ Schiff",
+    typeAir:           "✈ Flug",
+    stateMoving:       "Fährt",
+    stateAtStop:       "Am Halt",
+    stateStopped:      "Gestoppt",
+    stateLoading:      "Beladung",
+    stateUnloading:    "Entladung",
+    stateWaiting:      "Wartet",
+    dpID:              "ID",
+    dpType:            "Typ",
+    dpLine:            "Linie",
+    dpState:           "Zustand",
+    dpSpeed:           "Geschwindigkeit",
+    dpDirection:       "Richtung",
+    dpForward:         "→ vorwärts",
+    dpBackward:        "← rückwärts",
+    dpPassengers:      "Passagiere",
+    dpCargo:           "Fracht",
+    dpLastStop:        "Letzter Halt",
+    dpNextStop:        "Nächster Halt",
+    dpPosX:            "Position X",
+    dpPosY:            "Position Y",
+    dpPosZ:            "Position Z",
+    exportCsv:         "CSV Export",
+    apiDocs:           "API-Docs",
+    rawJson:           "Raw JSON",
+    filterActive:      "Filter aktiv: {v}",
+    filterClick:       "Zum Filterfeld klicken",
+  },
+  en: {
+    subtitle:          "Real-Time Schedule",
+    connecting:        "Connecting…",
+    connected:         "Live",
+    disconnected:      "Disconnected",
+    vehicles:          "Vehicles",
+    passengers:        "Total Passengers",
+    lines:             "Lines",
+    stations:          "Stations",
+    searchPlaceholder: "🔍  Search vehicle / line / station…",
+    all:               "All",
+    train:             "🚆 Train",
+    bus:               "🚌 Bus",
+    tram:              "🚋 Tram",
+    ship:              "⛴ Ship",
+    plane:             "✈ Plane",
+    sortName:          "Sort: Name",
+    sortSpeed:         "Sort: Speed",
+    sortPassengers:    "Sort: Passengers",
+    sortType:          "Sort: Type",
+    sortState:         "Sort: State",
+    sortLastStop:      "Sort: Last Stop",
+    sortNextStop:      "Sort: Next Stop",
+    sortOccupancy:     "Sort: Occupancy",
+    sortLine:          "Sort: Line",
+    colVehicle:        "Vehicle",
+    colType:           "Type",
+    colLine:           "Line",
+    colState:          "State",
+    colSpeed:          "Speed",
+    colLastStop:       "Last Stop",
+    colNextStop:       "Next Stop",
+    colPax:            "Pax",
+    colOccupancy:      "Occupancy",
+    filterPlaceholder: "Filter…",
+    waitingForData:    "Waiting for data…",
+    noResults:         "No results for the current filter settings.",
+    waitingForVehicles:"Waiting for vehicle data…",
+    lastUpdated:       "Updated: ",
+    justNow:           "just now",
+    secondsAgo:        "{n}s ago",
+    minutesAgo:        "{n}min ago",
+    typeRail:          "🚆 Train",
+    typeRoad:          "🚌 Bus",
+    typeTram:          "🚋 Tram",
+    typeWater:         "⛴ Ship",
+    typeAir:           "✈ Plane",
+    stateMoving:       "Moving",
+    stateAtStop:       "At stop",
+    stateStopped:      "Stopped",
+    stateLoading:      "Loading",
+    stateUnloading:    "Unloading",
+    stateWaiting:      "Waiting",
+    dpID:              "ID",
+    dpType:            "Type",
+    dpLine:            "Line",
+    dpState:           "State",
+    dpSpeed:           "Speed",
+    dpDirection:       "Direction",
+    dpForward:         "→ forward",
+    dpBackward:        "← backward",
+    dpPassengers:      "Passengers",
+    dpCargo:           "Cargo",
+    dpLastStop:        "Last Stop",
+    dpNextStop:        "Next Stop",
+    dpPosX:            "Position X",
+    dpPosY:            "Position Y",
+    dpPosZ:            "Position Z",
+    exportCsv:         "CSV Export",
+    apiDocs:           "API Docs",
+    rawJson:           "Raw JSON",
+    filterActive:      "Filter active: {v}",
+    filterClick:       "Click to focus filter",
+  },
+};
+
+// ─── i18n helpers ─────────────────────────────────────────────────────────────
+// _lang is kept in sync with Alpine store.app.lang
+let _lang = appStore()?.lang ?? localStorage.getItem("tpf2_lang") ?? "de";
+
+function t(key, vars) {
+  let str = (STRINGS[_lang] || STRINGS.de)[key] || key;
+  if (vars) for (const [k, v] of Object.entries(vars)) str = str.replace(`{${k}}`, v);
+  return str;
+}
+
+function applyI18n() {
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(el => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  document.documentElement.lang = _lang;
+}
+
+// Expose t() for Alpine inline expressions (conn-label text lookup)
+window.tpf2T = t;
+
+// ─── App config ───────────────────────────────────────────────────────────────
+const WS_URL             = `ws://${location.host}/ws`;
 const RECONNECT_DELAY_MS = 3000;
 
-// ─── Zustand ─────────────────────────────────────────────────────────────────
-let _state = {
-  vehicles:  [],
-  lines:     [],
-  stations:  [],
-  stats:     {},
-  game_time: null,
-  timestamp: null,
-};
+// ─── State ────────────────────────────────────────────────────────────────────
+let _state = { vehicles: [], lines: [], stations: [], stats: {}, game_time: null, timestamp: null };
+let _selectedVid   = null;
+let _ws            = null;
+let _reconnecting  = false;
+let _firstRender   = true;
+let _stationById   = new Map();
+let _lineById      = new Map();
+let _columnFilters = { name:"", type:"", line_name:"", state:"", last_stop_name:"", next_stop_name:"" };
 
-let _filterType   = "ALL";
-let _sortKey      = "name";
-let _searchQuery  = "";
-let _selectedVid  = null;
-let _ws           = null;
-let _reconnecting = false;
-let _stationById  = new Map();
-let _lineById     = new Map();
-let _columnFilters = {
-  name: "",
-  type: "",
-  line_name: "",
-  state: "",
-  last_stop_name: "",
-  next_stop_name: "",
-};
+// WS connection state (read by tpf2HandleHtmx to avoid double-processing)
+window.tpf2WsConnected = false;
 
-// ─── DOM-Referenzen ──────────────────────────────────────────────────────────
-const connDot      = document.getElementById("conn-dot");
-const connLabel    = document.getElementById("conn-label");
-const gameTimeBox  = document.getElementById("game-time-box");
-const lastUpdateBox= document.getElementById("last-update-box");
-const tbody        = document.getElementById("vehicle-tbody");
-const detailPanel  = document.getElementById("detail-panel");
-const dpName       = document.getElementById("dp-name");
-const dpGrid       = document.getElementById("dp-grid");
-const searchInput  = document.getElementById("search-input");
-const sortSelect   = document.getElementById("sort-select");
+// ─── DOM references ───────────────────────────────────────────────────────────
+const connLabel     = document.getElementById("conn-label");
+const tbody         = document.getElementById("vehicle-tbody");
+const detailPanel   = document.getElementById("detail-panel");
+const dpName        = document.getElementById("dp-name");
+const dpGrid        = document.getElementById("dp-grid");
+const searchInput   = document.getElementById("search-input");
 
-// ─── Hilfsfunktionen ─────────────────────────────────────────────────────────
+// ─── Utility ──────────────────────────────────────────────────────────────────
 const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 
 function fmtSpeed(kmh) {
-  if (kmh === 0 || kmh == null) return '<span class="speed-slow">0 km/h</span>';
+  if (kmh === 0 || kmh == null) return `<span class="speed-cell speed-slow">0 km/h</span>`;
   const cls = kmh > 180 ? "speed-fast" : kmh > 60 ? "speed-medium" : "speed-slow";
   return `<span class="speed-cell ${cls}">${kmh} km/h</span>`;
 }
 
 function fmtType(type) {
-  const map = { RAIL:"🚆 Zug", ROAD:"🚌 Bus", TRAM:"🚋 Tram", WATER:"⛴ Schiff", AIR:"✈ Flug" };
-  const label = map[type] || type;
-  return `<span class="type-badge type-${type}">${esc(label)}</span>`;
+  const labels = {
+    RAIL: t("typeRail"), ROAD: t("typeRoad"), TRAM: t("typeTram"),
+    WATER: t("typeWater"), AIR: t("typeAir"),
+  };
+  return `<span class="type-badge type-${type}">${esc(labels[type] || type)}</span>`;
 }
 
 function fmtState(state) {
   const raw = String(state || "UNKNOWN").toUpperCase();
   const map = {
-    IN_TRANSIT:  { label: "Fährt", cls: "moving" },
-    EN_ROUTE:    { label: "Fährt", cls: "moving" },
-    AT_TERMINAL: { label: "Am Halt", cls: "stop" },
-    STOPPED:     { label: "Gestoppt", cls: "stopped" },
-    LOADING:     { label: "Beladung", cls: "service" },
-    UNLOADING:   { label: "Entladung", cls: "service" },
-    WAITING:     { label: "Wartet", cls: "idle" },
+    IN_TRANSIT:  { lk:"stateMoving",    cls:"moving"  },
+    EN_ROUTE:    { lk:"stateMoving",    cls:"moving"  },
+    AT_TERMINAL: { lk:"stateAtStop",    cls:"stop"    },
+    STOPPED:     { lk:"stateStopped",   cls:"stopped" },
+    LOADING:     { lk:"stateLoading",   cls:"service" },
+    UNLOADING:   { lk:"stateUnloading", cls:"service" },
+    WAITING:     { lk:"stateWaiting",   cls:"idle"    },
   };
-  const meta = map[raw] || { label: raw || "UNKNOWN", cls: "unknown" };
-  return `<span class="state-badge state-${meta.cls}">${esc(meta.label)}</span>`;
+  const m = map[raw];
+  return `<span class="state-badge state-${m ? m.cls : "unknown"}">${esc(m ? t(m.lk) : (raw||"UNKNOWN"))}</span>`;
 }
 
 function fmtOccupancy(pax, cap) {
-  if (!cap || cap === 0) return '<span class="pax-cell">–</span>';
+  if (!cap) return `<span class="pax-cell">–</span>`;
   const pct = Math.min(100, Math.round(pax / cap * 100));
   const cls = pct >= 80 ? "occ-high" : pct >= 50 ? "occ-mid" : "occ-low";
-  return `
-    <div class="occ-bar-wrap" title="${pax}/${cap} (${pct}%)">
-      <div class="occ-bar ${cls}" style="width:${pct}%"></div>
-    </div>`;
+  return `<div class="occ-bar-wrap" title="${pax}/${cap} (${pct}%)"><div class="occ-bar ${cls}" style="width:${pct}%"></div></div>`;
 }
 
 function fmtPax(pax, cap) {
-  if (!cap || cap === 0) return `<span class="pax-cell">${pax}</span>`;
+  if (!cap) return `<span class="pax-cell">${pax}</span>`;
   return `<span class="pax-cell">${pax} / ${cap}</span>`;
-}
-
-function fmtPos(pos) {
-  if (!pos) return "–";
-  return `(${pos.x}, ${pos.y}, ${pos.z})`;
 }
 
 function timeAgo(ts) {
   if (!ts) return "–";
   const delta = Math.round(Date.now() / 1000 - ts);
-  if (delta < 5)  return "gerade eben";
-  if (delta < 60) return `vor ${delta}s`;
-  return `vor ${Math.round(delta/60)}min`;
+  if (delta < 5)  return t("justNow");
+  if (delta < 60) return t("secondsAgo", { n: delta });
+  return t("minutesAgo", { n: Math.round(delta / 60) });
 }
 
 function fmtGameTime(gt) {
-  if (!gt) return "–";
-  
-  if (typeof gt === "number") {
-    return `Spielzeit: ${gt}`;
-  }
-  
+  if (!gt) return null;
+  if (typeof gt === "number") return String(gt);
   if (typeof gt === "object") {
-    // TPF2 packt das Datum in ein "date"-Unterobjekt
-    const dateObj = gt.date || gt;
-    const { year, month, day, hour, minute } = dateObj;
-    
-    if (year != null) {
-      const m = String(month||1).padStart(2,"0");
-      const d = String(day||1).padStart(2,"0");
-      
-      // TPF2 liefert standardmäßig keine Uhrzeit mit, wir blenden sie aus, wenn sie fehlt
-      if (hour != null || minute != null) {
-          const h = String(hour||0).padStart(2,"0");
-          const min = String(minute||0).padStart(2,"0");
-          return `🕐 ${year}-${m}-${d} ${h}:${min}`;
-      }
-      
-      return `📅 ${d}.${m}.${year}`;
+    const d = gt.date || gt;
+    if (d.year != null) {
+      const mo = String(d.month||1).padStart(2,"0");
+      const dy = String(d.day||1).padStart(2,"0");
+      if (d.hour != null || d.minute != null)
+        return `🕐 ${d.year}-${mo}-${dy} ${String(d.hour||0).padStart(2,"0")}:${String(d.minute||0).padStart(2,"0")}`;
+      return `📅 ${dy}.${mo}.${d.year}`;
     }
   }
   return JSON.stringify(gt);
@@ -138,75 +306,65 @@ function fmtGameTime(gt) {
 
 function rebuildIndexes() {
   _stationById = new Map();
-  for (const s of (_state.stations || [])) {
-    if (s && s.id != null) _stationById.set(Number(s.id), s.name || "");
-  }
-
+  for (const s of (_state.stations || [])) if (s?.id != null) _stationById.set(Number(s.id), s.name || "");
   _lineById = new Map();
-  for (const l of (_state.lines || [])) {
-    if (l && l.id != null) _lineById.set(Number(l.id), l);
-  }
+  for (const l of (_state.lines || [])) if (l?.id != null) _lineById.set(Number(l.id), l);
 }
 
-function isPlaceholderStopName(name) {
-  if (!name) return true;
-  return /^(stop|station)\s*#\d+$/i.test(String(name).trim());
+function isPlaceholderName(name) {
+  return !name || /^(stop|station)\s*#\d+$/i.test(String(name).trim());
 }
 
 function getVehicleType(v) {
   const raw = String(v.type || "UNKNOWN").toUpperCase();
   if (raw === "TRAM") return "TRAM";
   if (raw === "ROAD") {
-    const text = `${v.line_name || ""} ${v.name || ""}`.toLowerCase();
+    const text = `${v.line_name||""} ${v.name||""}`.toLowerCase();
     if (/\btram\b|straßenbahn|strassenbahn|streetcar/.test(text)) return "TRAM";
   }
   return raw;
 }
 
 function resolveStopName(v, which) {
-  const idKey = which === "last" ? "last_stop_id" : "next_stop_id";
-  const nameKey = which === "last" ? "last_stop_name" : "next_stop_name";
-  const stopId = Number(v[idKey] || 0);
-  const rawName = (v[nameKey] || "").trim();
-
-  if (rawName && !isPlaceholderStopName(rawName)) return rawName;
-
+  const stopId  = Number(v[which === "last" ? "last_stop_id" : "next_stop_id"] || 0);
+  const rawName = (v[which === "last" ? "last_stop_name" : "next_stop_name"] || "").trim();
+  if (rawName && !isPlaceholderName(rawName)) return rawName;
   const byStation = _stationById.get(stopId);
-  if (byStation && !isPlaceholderStopName(byStation)) return byStation;
-
+  if (byStation && !isPlaceholderName(byStation)) return byStation;
   const line = _lineById.get(Number(v.line_id || 0));
-  if (line && Array.isArray(line.stops)) {
-    const stop = line.stops.find(s => Number(s.station_id || 0) === stopId);
-    if (stop && stop.name && !isPlaceholderStopName(stop.name)) return stop.name;
+  if (line?.stops) {
+    const stop = line.stops.find(s => Number(s.station_id||0) === stopId);
+    if (stop?.name && !isPlaceholderName(stop.name)) return stop.name;
   }
-
   return rawName || (stopId ? `Stop #${stopId}` : "–");
 }
 
-// ─── Filterung & Sortierung ──────────────────────────────────────────────────
+// ─── Filtering & sorting ──────────────────────────────────────────────────────
+// Read reactive state from Alpine store (primary) with local fallback
+function getFilterType()  { return appStore()?.filterType   ?? "ALL";  }
+function getSortKey()     { return appStore()?.sortKey       ?? "name"; }
+function getSearchQuery() { return appStore()?.searchQuery   ?? "";     }
+
 function filteredVehicles() {
-  let list = _state.vehicles || [];
+  let list         = _state.vehicles || [];
+  const filterType = getFilterType();
+  const searchQ    = getSearchQuery();
 
-  // Typ-Filter
-  if (_filterType !== "ALL") {
-    list = list.filter(v => getVehicleType(v) === _filterType);
-  }
+  if (filterType !== "ALL") list = list.filter(v => getVehicleType(v) === filterType);
 
-  // Suche
-  if (_searchQuery) {
-    const q = _searchQuery.toLowerCase();
+  if (searchQ) {
+    const q = searchQ.toLowerCase();
     list = list.filter(v =>
-      (v.name       || "").toLowerCase().includes(q) ||
-      (v.line_name  || "").toLowerCase().includes(q) ||
-      resolveStopName(v, "last").toLowerCase().includes(q) ||
-      resolveStopName(v, "next").toLowerCase().includes(q)
+      (v.name||"").toLowerCase().includes(q) ||
+      (v.line_name||"").toLowerCase().includes(q) ||
+      resolveStopName(v,"last").toLowerCase().includes(q) ||
+      resolveStopName(v,"next").toLowerCase().includes(q)
     );
   }
 
-  // Spalten-Filter
   if (_columnFilters.name) {
     const q = _columnFilters.name.toLowerCase();
-    list = list.filter(v => (v.name || "").toLowerCase().includes(q));
+    list = list.filter(v => (v.name||"").toLowerCase().includes(q));
   }
   if (_columnFilters.type) {
     const q = _columnFilters.type.toLowerCase();
@@ -214,268 +372,303 @@ function filteredVehicles() {
   }
   if (_columnFilters.line_name) {
     const q = _columnFilters.line_name.toLowerCase();
-    list = list.filter(v => (v.line_name || "").toLowerCase().includes(q));
+    list = list.filter(v => (v.line_name||"").toLowerCase().includes(q));
   }
   if (_columnFilters.state) {
     const q = _columnFilters.state.toLowerCase();
-    list = list.filter(v => (v.state || "").toLowerCase().includes(q));
+    list = list.filter(v => (v.state||"").toLowerCase().includes(q));
   }
   if (_columnFilters.last_stop_name) {
     const q = _columnFilters.last_stop_name.toLowerCase();
-    list = list.filter(v => resolveStopName(v, "last").toLowerCase().includes(q));
+    list = list.filter(v => resolveStopName(v,"last").toLowerCase().includes(q));
   }
   if (_columnFilters.next_stop_name) {
     const q = _columnFilters.next_stop_name.toLowerCase();
-    list = list.filter(v => resolveStopName(v, "next").toLowerCase().includes(q));
+    list = list.filter(v => resolveStopName(v,"next").toLowerCase().includes(q));
   }
 
-  // Sortierung
-  list = [...list].sort((a, b) => {
-    const aOcc = (a.capacity || 0) > 0 ? (a.passengers || 0) / a.capacity : -1;
-    const bOcc = (b.capacity || 0) > 0 ? (b.passengers || 0) / b.capacity : -1;
-
-    switch (_sortKey) {
-      case "speed":      return (b.speed_kmh || 0) - (a.speed_kmh || 0);
-      case "passengers": return (b.passengers || 0) - (a.passengers || 0);
-      case "type": {
-        // Typ-Sortierung nur sinnvoll bei "Alle"; bei aktivem Typ-Filter fallback auf Name
-        if (_filterType === "ALL") {
-          return getVehicleType(a).localeCompare(getVehicleType(b)) ||
-                 (a.name || "").localeCompare(b.name || "");
-        }
-        return (a.name || "").localeCompare(b.name || "");
-      }
-      case "state":
-        return (a.state || "").localeCompare(b.state || "") ||
-               (a.name || "").localeCompare(b.name || "");
-      case "last_stop":
-        return resolveStopName(a, "last").localeCompare(resolveStopName(b, "last")) ||
-               (a.name || "").localeCompare(b.name || "");
-      case "next_stop":
-        return resolveStopName(a, "next").localeCompare(resolveStopName(b, "next")) ||
-               (a.name || "").localeCompare(b.name || "");
-      case "occupancy":
-        return bOcc - aOcc || (b.passengers || 0) - (a.passengers || 0);
-      case "line":       return (a.line_name || "").localeCompare(b.line_name || "");
-      default:           return (a.name || "").localeCompare(b.name || "");
+  const sortKey = getSortKey();
+  return [...list].sort((a, b) => {
+    const aOcc = (a.capacity||0)>0 ? (a.passengers||0)/a.capacity : -1;
+    const bOcc = (b.capacity||0)>0 ? (b.passengers||0)/b.capacity : -1;
+    switch (sortKey) {
+      case "speed":      return (b.speed_kmh||0)-(a.speed_kmh||0);
+      case "passengers": return (b.passengers||0)-(a.passengers||0);
+      case "type":       return getFilterType()==="ALL"
+        ? getVehicleType(a).localeCompare(getVehicleType(b))||(a.name||"").localeCompare(b.name||"")
+        : (a.name||"").localeCompare(b.name||"");
+      case "state":      return (a.state||"").localeCompare(b.state||"")||(a.name||"").localeCompare(b.name||"");
+      case "last_stop":  return resolveStopName(a,"last").localeCompare(resolveStopName(b,"last"))||(a.name||"").localeCompare(b.name||"");
+      case "next_stop":  return resolveStopName(a,"next").localeCompare(resolveStopName(b,"next"))||(a.name||"").localeCompare(b.name||"");
+      case "occupancy":  return bOcc-aOcc||(b.passengers||0)-(a.passengers||0);
+      case "line":       return (a.line_name||"").localeCompare(b.line_name||"");
+      default:           return (a.name||"").localeCompare(b.name||"");
     }
   });
-
-  return list;
 }
 
 function updateHeaderFilterIndicators() {
   document.querySelectorAll("th[data-filter-key]").forEach(th => {
-    const key = th.dataset.filterKey;
+    const key    = th.dataset.filterKey;
     const active = Boolean(_columnFilters[key]);
     th.classList.toggle("filtered", active);
-    th.title = active
-      ? `Filter aktiv: ${_columnFilters[key]}`
-      : "Zum Filterfeld klicken";
+    th.title = active ? t("filterActive", { v: _columnFilters[key] }) : t("filterClick");
   });
-
   document.querySelectorAll(".col-filter-input[data-filter-key]").forEach(input => {
-    const key = input.dataset.filterKey;
-    const current = _columnFilters[key] || "";
+    const current = _columnFilters[input.dataset.filterKey] || "";
     if (input.value !== current) input.value = current;
   });
 }
 
-// ─── Rendering ───────────────────────────────────────────────────────────────
-function renderStats() {
-  const s = _state.stats || {};
-  document.getElementById("sv-vehicles").textContent   = s.total_vehicles   ?? "–";
-  document.getElementById("sv-passengers").textContent = s.total_passengers ?? "–";
-  document.getElementById("sv-lines").textContent      = s.total_lines      ?? "–";
-  document.getElementById("sv-stations").textContent   = s.total_stations   ?? "–";
+// ─── Stats animation helper ───────────────────────────────────────────────────
+function updateStatCard(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const newText = value ?? "–";
+  if (el.textContent === String(newText)) return;
+  // Alpine x-text manages the value; we only animate the flash
+  doAnimate(el, { scale: [1.18, 1], color: ["#3b82f6", ""] }, { duration: 0.35, easing: EASING_SPRING });
+}
 
-  if (_state.timestamp) {
-    lastUpdateBox.textContent = "Aktualisiert: " + timeAgo(_state.timestamp);
-  }
-  if (_state.game_time) {
-    gameTimeBox.textContent = fmtGameTime(_state.game_time);
-    gameTimeBox.style.display = "";
+// ─── Render stats into Alpine store ──────────────────────────────────────────
+function renderStats() {
+  const store = appStore();
+  const s     = _state.stats || {};
+  if (store) {
+    // Animate flash if value changed before Alpine x-text updates it
+    if (store.stats.total_vehicles !== s.total_vehicles)   updateStatCard("sv-vehicles",   s.total_vehicles);
+    if (store.stats.total_passengers !== s.total_passengers) updateStatCard("sv-passengers", s.total_passengers);
+    if (store.stats.total_lines !== s.total_lines)         updateStatCard("sv-lines",      s.total_lines);
+    if (store.stats.total_stations !== s.total_stations)   updateStatCard("sv-stations",   s.total_stations);
+
+    // Update Alpine store (x-text bindings update automatically)
+    store.stats       = { ...s };
+    store.gameTime    = fmtGameTime(_state.game_time);
+    store.lastUpdated = t("lastUpdated") + timeAgo(_state.timestamp);
   }
 }
 
+// ─── Render table ─────────────────────────────────────────────────────────────
 function renderTable() {
   const list = filteredVehicles();
+
   if (list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="9" class="empty-row">
-      ${_searchQuery || _filterType !== "ALL" ? "Keine Ergebnisse für diese Filtereinstellungen." : "Warte auf Fahrzeugdaten…"}
+    tbody.innerHTML = `<tr><td colspan="9" class="empty-cell">
+      ${getSearchQuery() || getFilterType() !== "ALL" ? t("noResults") : t("waitingForVehicles")}
     </td></tr>`;
     return;
   }
 
-  // Leere/Placeholder-Zeilen entfernen, wenn echte Daten vorhanden sind
-  for (const row of tbody.querySelectorAll("tr:not([data-vid])")) {
-    row.remove();
-  }
+  for (const row of tbody.querySelectorAll("tr:not([data-vid])")) row.remove();
 
-  // Effizientes Diff-Update: nur geänderte Zeilen neu rendern
   const existing = new Map();
-  for (const row of tbody.querySelectorAll("tr[data-vid]")) {
+  for (const row of tbody.querySelectorAll("tr[data-vid]"))
     existing.set(String(row.dataset.vid), row);
-  }
 
-  const seen = new Set();
-  let cursor = tbody.firstElementChild;
+  const seen    = new Set();
+  let   cursor  = tbody.firstElementChild;
+  const newRows = [];
 
   for (const v of list) {
-    const vid = String(v.id);
+    const vid          = String(v.id);
     seen.add(vid);
-    const vType = getVehicleType(v);
+    const vType        = getVehicleType(v);
     const lastStopName = resolveStopName(v, "last");
     const nextStopName = resolveStopName(v, "next");
 
-    const pct = v.capacity > 0 ? Math.round(v.passengers / v.capacity * 100) : 0;
     const rowHTML = `
-      <td class="vname" title="${esc(v.name)}">${esc(v.name)}</td>
+      <td class="td-name"      title="${esc(v.name)}">${esc(v.name)}</td>
       <td>${fmtType(vType || "UNKNOWN")}</td>
-      <td title="${esc(v.line_name)}">${esc(v.line_name || "–")}</td>
+      <td class="td-secondary" title="${esc(v.line_name)}">${esc(v.line_name || "–")}</td>
       <td>${fmtState(v.state || "UNKNOWN")}</td>
       <td>${fmtSpeed(v.speed_kmh)}</td>
-      <td title="${esc(lastStopName)}">${esc(lastStopName || "–")}</td>
-      <td title="${esc(nextStopName)}">${esc(nextStopName || "–")}</td>
+      <td class="td-secondary" title="${esc(lastStopName)}">${esc(lastStopName || "–")}</td>
+      <td class="td-secondary" title="${esc(nextStopName)}">${esc(nextStopName || "–")}</td>
       <td>${fmtPax(v.passengers, v.capacity)}</td>
       <td>${fmtOccupancy(v.passengers, v.capacity)}</td>
     `;
 
     let row = existing.get(vid);
     if (row) {
-      // Prüfen ob sich etwas geändert hat
-      const newInner = rowHTML.trim();
-      if (row.innerHTML.trim() !== newInner) {
-        row.innerHTML = rowHTML;
-      }
+      if (row.innerHTML.trim() !== rowHTML.trim()) row.innerHTML = rowHTML;
     } else {
       row = document.createElement("tr");
       row.dataset.vid = vid;
-      row.innerHTML = rowHTML;
+      row.innerHTML   = rowHTML;
       row.addEventListener("click", () => openDetail(vid));
+      newRows.push(row);
     }
 
-    if (String(vid) === String(_selectedVid)) row.classList.add("selected");
-    else row.classList.remove("selected");
-
-    // Nur verschieben, wenn wirklich nötig (verhindert unnötiges "Neu"-Verhalten)
-    if (row === cursor) {
-      cursor = cursor ? cursor.nextElementSibling : null;
-    } else {
-      tbody.insertBefore(row, cursor);
-    }
+    row.classList.toggle("selected", String(vid) === String(_selectedVid));
+    if (row === cursor) cursor = cursor.nextElementSibling;
+    else tbody.insertBefore(row, cursor);
   }
 
-  // Entferne Zeilen, die nicht mehr sichtbar sind
-  for (const [vid, row] of existing) {
-    if (!seen.has(vid)) row.remove();
+  for (const [vid, row] of existing) if (!seen.has(vid)) row.remove();
+
+  if (_firstRender && tbody.querySelectorAll("tr[data-vid]").length > 0) {
+    const rows = Array.from(tbody.querySelectorAll("tr[data-vid]"));
+    doAnimate(rows, { opacity: [0, 1], y: [6, 0] },
+      { delay: _stagger ? _stagger(0.025) : 0, duration: 0.2, easing: "ease-out" });
+    _firstRender = false;
+  } else if (newRows.length > 0) {
+    doAnimate(newRows, { opacity: [0, 1] }, { duration: 0.2 });
   }
 }
 
-// ─── Detail-Panel ────────────────────────────────────────────────────────────
+// Expose for Alpine store callbacks
+window.tpf2Render = renderTable;
+
+// ─── Detail panel ─────────────────────────────────────────────────────────────
 function openDetail(vid, rerenderTable = true) {
-  const vidKey = String(vid);
-  const v = (_state.vehicles || []).find(x => String(x.id) === vidKey);
+  const v = (_state.vehicles || []).find(x => String(x.id) === String(vid));
   if (!v) return;
 
-  _selectedVid = vidKey;
-  detailPanel.classList.remove("hidden");
-
-  dpName.textContent = v.name;
-
+  _selectedVid = String(vid);
   const lastStopName = resolveStopName(v, "last");
   const nextStopName = resolveStopName(v, "next");
 
+  dpName.textContent = v.name;
+
   const rows = [
-    ["ID",            v.id],
-    ["Typ",           getVehicleType(v)],
-    ["Linie",         v.line_name || `#${v.line_id}`],
-    ["Zustand",       v.state],
-    null, // divider
-    ["Geschwindigkeit", `${v.speed_kmh} km/h (${v.speed_ms} m/s)`],
-    ["Richtung",      v.direction === 1 ? "→ vorwärts" : "← rückwärts"],
+    [t("dpID"),        v.id],
+    [t("dpType"),      getVehicleType(v)],
+    [t("dpLine"),      v.line_name || `#${v.line_id}`],
+    [t("dpState"),     v.state],
     null,
-    ["Passagiere",    `${v.passengers} / ${v.capacity || "?"}`],
-    v.cargo_capacity > 0 ? ["Fracht", `${v.cargo} / ${v.cargo_capacity}`] : null,
+    [t("dpSpeed"),     `${v.speed_kmh} km/h (${v.speed_ms} m/s)`],
+    [t("dpDirection"), v.direction === 1 ? t("dpForward") : t("dpBackward")],
     null,
-    ["Letzter Halt",  lastStopName || `#${v.last_stop_id}`],
-    ["Nächster Halt", nextStopName || `#${v.next_stop_id}`],
+    [t("dpPassengers"),`${v.passengers} / ${v.capacity || "?"}`],
+    v.cargo_capacity > 0 ? [t("dpCargo"), `${v.cargo} / ${v.cargo_capacity}`] : null,
     null,
-    ["Position X",    v.position ? v.position.x : "–"],
-    ["Position Y",    v.position ? v.position.y : "–"],
-    ["Position Z",    v.position ? v.position.z : "–"],
+    [t("dpLastStop"),  lastStopName || `#${v.last_stop_id}`],
+    [t("dpNextStop"),  nextStopName || `#${v.next_stop_id}`],
+    null,
+    [t("dpPosX"),      v.position ? v.position.x : "–"],
+    [t("dpPosY"),      v.position ? v.position.y : "–"],
+    [t("dpPosZ"),      v.position ? v.position.z : "–"],
   ];
 
-  let html = "";
-  for (const row of rows) {
-    if (!row) {
-      html += `<div class="dp-divider"></div><div></div>`;
-      continue;
-    }
-    const [key, val] = row;
-    html += `<div class="dp-key">${esc(key)}</div><div class="dp-value">${esc(String(val ?? "–"))}</div>`;
-  }
-  dpGrid.innerHTML = html;
+  dpGrid.innerHTML = rows.map(row => {
+    if (!row) return `<div class="dp-divider"></div><div></div>`;
+    return `<div class="dp-key">${esc(row[0])}</div><div class="dp-value">${esc(String(row[1] ?? "–"))}</div>`;
+  }).join("");
 
-  // Aktive Zeile in Tabelle markieren
+  // Alpine x-show / x-transition handle visibility + animation
+  const store = appStore();
+  if (store) store.detailVisible = true;
+
   if (rerenderTable) renderTable();
 }
 
-document.getElementById("detail-close").addEventListener("click", () => {
+// Close detail panel (called by Alpine store.closeDetail())
+window.tpf2CloseDetail = () => {
   _selectedVid = null;
-  detailPanel.classList.add("hidden");
+  const store = appStore();
+  if (store) store.detailVisible = false;
   renderTable();
-});
+};
 
-// ─── Filter-Events ───────────────────────────────────────────────────────────
-document.getElementById("type-filter").addEventListener("click", e => {
-  const pill = e.target.closest(".pill");
-  if (!pill) return;
-  document.querySelectorAll(".pill").forEach(p => p.classList.remove("active"));
-  pill.classList.add("active");
-  _filterType = pill.dataset.type;
+// ─── Central data handler ─────────────────────────────────────────────────────
+function handleTelemetryData(data) {
+  if (!data || typeof data !== "object") return;
+  _state = data;
+  rebuildIndexes();
+  renderStats();
   renderTable();
-});
+  if (_selectedVid != null) openDetail(_selectedVid, false);
+}
+window.tpf2HandleData = handleTelemetryData;
 
+// ─── CSV export ───────────────────────────────────────────────────────────────
+function exportCSV() {
+  const list    = filteredVehicles();
+  const headers = ["ID","Name","Type","Line","State","Speed (km/h)",
+    "Last Stop","Next Stop","Passengers","Capacity","Cargo","Cargo Capacity",
+    "Pos X","Pos Y","Pos Z"];
+  const rows = list.map(v => [
+    v.id, v.name, getVehicleType(v), v.line_name||"", v.state, v.speed_kmh,
+    resolveStopName(v,"last"), resolveStopName(v,"next"),
+    v.passengers, v.capacity, v.cargo, v.cargo_capacity,
+    v.position?.x??"", v.position?.y??"", v.position?.z??"",
+  ]);
+  const csv = [headers,...rows]
+    .map(r => r.map(c => `"${String(c??"").replace(/"/g,'""')}"`).join(","))
+    .join("\r\n");
+  const a = Object.assign(document.createElement("a"), {
+    href:     URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8;" })),
+    download: `tpf2_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.csv`,
+  });
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+document.getElementById("export-csv").addEventListener("click", exportCSV);
+
+// ─── Column filter inputs (remain in app.js – complex, not Alpine) ────────────
 document.querySelector("#vehicle-table thead").addEventListener("click", e => {
   const th = e.target.closest("th[data-filter-key]");
   if (!th) return;
-  const key = th.dataset.filterKey;
-  const input = document.querySelector(`.col-filter-input[data-filter-key="${key}"]`);
-  if (input) input.focus();
+  document.querySelector(`.col-filter-input[data-filter-key="${th.dataset.filterKey}"]`)?.focus();
 });
 
 document.querySelectorAll(".col-filter-input[data-filter-key]").forEach(input => {
   input.addEventListener("input", () => {
-    const key = input.dataset.filterKey;
-    _columnFilters[key] = input.value.trim();
+    _columnFilters[input.dataset.filterKey] = input.value.trim();
     updateHeaderFilterIndicators();
     renderTable();
   });
 });
 
-searchInput.addEventListener("input", () => {
-  _searchQuery = searchInput.value.trim();
-  renderTable();
-});
+// ─── Language toggle (called by Alpine store.toggleLang()) ───────────────────
+window.tpf2ToggleLang = () => {
+  _lang = _lang === "de" ? "en" : "de";
+  localStorage.setItem("tpf2_lang", _lang);
 
-sortSelect.addEventListener("change", () => {
-  _sortKey = sortSelect.value;
-  renderTable();
-});
+  // Sync Alpine store.lang so x-text on the button updates
+  const store = appStore();
+  if (store) store.lang = _lang;
 
-// ─── WebSocket-Verbindung ────────────────────────────────────────────────────
+  applyI18n();
+  renderStats();
+  renderTable();
+  updateHeaderFilterIndicators();
+  if (_selectedVid != null) openDetail(_selectedVid, false);
+};
+
+// ─── HTMX callback ────────────────────────────────────────────────────────────
+// Called by hx-on::after-request on the polling div in index.html.
+// Only uses REST data when the WebSocket is NOT connected (true fallback).
+window.tpf2HandleHtmx = (event) => {
+  const xhr = event?.detail?.xhr;
+  if (!xhr || xhr.status !== 200) return;
+  if (window.tpf2WsConnected) return; // WS is live – REST data not needed
+  try {
+    handleTelemetryData(JSON.parse(xhr.responseText));
+  } catch (_) {}
+};
+
+// ─── Connection state ─────────────────────────────────────────────────────────
 function setConnState(state) {
-  // state: "connecting" | "connected" | "disconnected"
-  connDot.className = "dot " + state;
-  const labels = { connecting: "Verbinde…", connected: "Live", disconnected: "Getrennt" };
-  connLabel.textContent = labels[state] || state;
+  // Update Alpine store (badge :class + dot :class animate reactively)
+  const store = appStore();
+  if (store) store.connState = state;
+
+  // Also update the static text label (applyI18n handles translation)
+  const labels = {
+    connecting:   t("connecting"),
+    connected:    t("connected"),
+    disconnected: t("disconnected"),
+  };
+  if (connLabel) connLabel.textContent = labels[state] || state;
+
+  window.tpf2WsConnected = (state === "connected");
 }
 
+// ─── WebSocket ────────────────────────────────────────────────────────────────
 function connectWS() {
-  if (_ws && _ws.readyState <= 1) return; // bereits verbunden / verbindend
+  if (_ws && _ws.readyState <= 1) return;
   setConnState("connecting");
-
   _ws = new WebSocket(WS_URL);
 
   _ws.onopen = () => {
@@ -486,55 +679,42 @@ function connectWS() {
   _ws.onmessage = evt => {
     try {
       const data = JSON.parse(evt.data);
-      // Keepalive-Ping ignorieren
       if (data.type === "ping") return;
-      _state = data;
-      rebuildIndexes();
-      renderStats();
-      renderTable();
-      // Detail-Panel aktualisieren falls offen
-      if (_selectedVid != null) openDetail(_selectedVid, false);
-    } catch (e) {
-      console.warn("WebSocket-Parsefehler:", e);
-    }
+      handleTelemetryData(data);
+    } catch (e) { console.warn("WebSocket parse error:", e); }
   };
 
-  _ws.onerror = err => {
-    console.warn("WebSocket-Fehler:", err);
-  };
+  _ws.onerror = err => console.warn("WebSocket error:", err);
 
   _ws.onclose = () => {
     setConnState("disconnected");
-    if (!_reconnecting) {
-      _reconnecting = true;
-      setTimeout(connectWS, RECONNECT_DELAY_MS);
-    }
+    if (!_reconnecting) { _reconnecting = true; setTimeout(connectWS, RECONNECT_DELAY_MS); }
   };
 }
 
-// ─── Init ────────────────────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
-  // Initialen Datenabruf über REST (falls WS noch nicht bereit)
-  fetch("/api/telemetry")
-    .then(r => r.json())
-    .then(data => {
-      if (data && Object.keys(data).length > 0) {
-        _state = data;
-        rebuildIndexes();
-        renderStats();
-        renderTable();
-      }
-    })
-    .catch(() => {});
+// ─── Init ─────────────────────────────────────────────────────────────────────
+// Alpine is already initialized (defer + module ordering guarantee).
+// Apply i18n to data-i18n elements (Alpine owns the reactive values,
+// app.js owns the static text labels and placeholders).
+applyI18n();
 
-  // WebSocket starten
-  connectWS();
-  updateHeaderFilterIndicators();
+// Initialise Lucide icons
+if (window.lucide) window.lucide.createIcons();
 
-  // Statusleiste jede Sekunde aktualisieren (Zeitanzeige)
-  setInterval(() => {
-    if (_state.timestamp) {
-      lastUpdateBox.textContent = "Aktualisiert: " + timeAgo(_state.timestamp);
-    }
-  }, 1000);
-});
+// Animate stats cards in
+doAnimate(
+  document.querySelectorAll(".stat-card"),
+  { opacity: [0, 1], y: [12, 0] },
+  { delay: _stagger ? _stagger(0.07) : 0, duration: 0.35, easing: EASING_OUT_CUBIC }
+);
+
+connectWS();
+updateHeaderFilterIndicators();
+
+// Refresh "last updated" label every second via Alpine store
+setInterval(() => {
+  const store = appStore();
+  if (store && _state.timestamp) {
+    store.lastUpdated = t("lastUpdated") + timeAgo(_state.timestamp);
+  }
+}, 1000);

@@ -1,11 +1,11 @@
 """
-TPF2 Echtzeit-Telemetrie Server
+TPF2 Real-Time Telemetry Server
 ================================
-FastAPI + WebSocket Server der telemetry.json beobachtet und live an
-verbundene Browser pusht.
+FastAPI + WebSocket server that watches telemetry.json and pushes live
+updates to connected browsers.
 
 Start:  python server.py
-Öffne:  http://localhost:8765
+Open:   http://localhost:8765
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -28,19 +29,19 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileModifiedEvent
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Konfiguration
+# Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Pfad zur telemetry.json (Standard: im selben Verzeichnis wie der Mod)
-# Kann als Umgebungsvariable TPF2_TELEMETRY_PATH oder als Kommandozeilen-
-# argument übergeben werden.
+# Path to telemetry.json (default: same directory as the mod)
+# Can be overridden via environment variable TPF2_TELEMETRY_PATH or as a
+# command-line argument.
 DEFAULT_TELEMETRY_PATH = Path(__file__).parent.parent / "telemetry.json"
 
 HOST        = os.environ.get("TPF2_HOST", "127.0.0.1")
 PORT        = int(os.environ.get("TPF2_PORT", "8765"))
 LOG_LEVEL   = os.environ.get("TPF2_LOG_LEVEL", "info")
 
-# Pfad überschreiben per Argument oder Env-Var
+# Override path via argument or env var
 if len(sys.argv) > 1:
     TELEMETRY_PATH = Path(sys.argv[1])
 elif "TPF2_TELEMETRY_PATH" in os.environ:
@@ -60,11 +61,11 @@ logging.basicConfig(
 log = logging.getLogger("tpf2-telemetry")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Datenspeicher (in-memory, thread-safe via asyncio.Lock)
+# Data store (in-memory, thread-safe via asyncio.Lock)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TelemetryStore:
-    """Hält den aktuellen Telemetrie-Zustand und benachrichtigt Listener."""
+    """Holds the current telemetry state and notifies listeners."""
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
@@ -74,26 +75,33 @@ class TelemetryStore:
         self.file_mtime: float = 0.0
 
     async def update(self, raw: str) -> None:
-        """Parst JSON-String und benachrichtigt alle WebSocket-Clients."""
+        """Parses a JSON string and notifies all WebSocket clients."""
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
-            log.warning("Ungültiges JSON: %s", exc)
+            log.warning("Invalid JSON: %s", exc)
             return
+
+        # Inject a server-side Unix timestamp when the game doesn't supply one.
+        # The TPF2 Lua sandbox has no os.time(), so write_count is used instead.
+        if not data.get("timestamp"):
+            data["timestamp"] = int(time.time())
+
+        broadcast_raw = json.dumps(data)
 
         async with self._lock:
             self._data = data
             self.last_update = time.time()
 
-        # Alle wartenden Queues befüllen (WebSocket-Handler)
+        # Fill all waiting queues (WebSocket handlers)
         for q in list(self._listeners):
             try:
-                q.put_nowait(raw)
+                q.put_nowait(broadcast_raw)
             except asyncio.QueueFull:
-                pass  # Client zu langsam – aktuellen Frame überspringen
+                pass  # Client too slow – skip current frame
 
         log.info(
-            "Update: %d Fahrzeuge | %d Linien | %d Stationen",
+            "Update: %d vehicles | %d lines | %d stations",
             len(data.get("vehicles", [])),
             len(data.get("lines",    [])),
             len(data.get("stations", [])),
@@ -118,11 +126,11 @@ class TelemetryStore:
 store = TelemetryStore()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Watchdog: Datei beobachten
+# Watchdog: watch file for changes
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TelemetryFileHandler(FileSystemEventHandler):
-    """Reagiert auf Änderungen der telemetry.json."""
+    """Reacts to changes in telemetry.json."""
 
     def __init__(self, path: Path, loop: asyncio.AbstractEventLoop) -> None:
         self._path = path.resolve()
@@ -131,18 +139,18 @@ class TelemetryFileHandler(FileSystemEventHandler):
     def on_modified(self, event: FileModifiedEvent) -> None:
         if Path(event.src_path).resolve() != self._path:
             return
-        # Datei asynchron lesen (im asyncio-Thread)
+        # Read file asynchronously (in the asyncio thread)
         asyncio.run_coroutine_threadsafe(self._reload(), self._loop)
 
     async def _reload(self) -> None:
-        """Liest telemetry.json und aktualisiert den Store."""
+        """Reads telemetry.json and updates the store."""
         try:
             mtime = self._path.stat().st_mtime
             if mtime == store.file_mtime:
-                return  # Keine echte Änderung
+                return  # No real change
             store.file_mtime = mtime
 
-            # Kurz warten, falls die Datei noch geschrieben wird
+            # Wait briefly in case the file is still being written
             await asyncio.sleep(0.05)
 
             content = self._path.read_text(encoding="utf-8")
@@ -150,23 +158,23 @@ class TelemetryFileHandler(FileSystemEventHandler):
                 return
             await store.update(content)
         except (OSError, PermissionError) as exc:
-            log.debug("Datei-Lesefehler (wird ignoriert): %s", exc)
+            log.debug("File read error (ignored): %s", exc)
 
 
 async def start_watchdog(loop: asyncio.AbstractEventLoop) -> None:
-    """Startet den Watchdog-Observer in einem separaten Thread."""
+    """Starts the watchdog observer in a separate thread."""
     watch_dir = TELEMETRY_PATH.parent
     if not watch_dir.exists():
-        log.warning("Watch-Verzeichnis existiert nicht: %s", watch_dir)
+        log.warning("Watch directory does not exist: %s", watch_dir)
         return
 
     handler  = TelemetryFileHandler(TELEMETRY_PATH, loop)
     observer = Observer()
     observer.schedule(handler, str(watch_dir), recursive=False)
     observer.start()
-    log.info("Beobachte: %s", TELEMETRY_PATH)
+    log.info("Watching: %s", TELEMETRY_PATH)
 
-    # Initiale Lessung beim Start
+    # Initial read on startup
     if TELEMETRY_PATH.exists():
         try:
             content = TELEMETRY_PATH.read_text(encoding="utf-8")
@@ -175,12 +183,12 @@ async def start_watchdog(loop: asyncio.AbstractEventLoop) -> None:
         except OSError:
             pass
 
-    # Observer läuft im Hintergrund – hier nur auf Shutdown warten
+    # Observer runs in the background – just wait for shutdown here
     try:
         while True:
             await asyncio.sleep(1)
             if not observer.is_alive():
-                log.warning("Watchdog-Observer gestorben – Neustart")
+                log.warning("Watchdog observer died – restarting")
                 observer.start()
     finally:
         observer.stop()
@@ -191,10 +199,21 @@ async def start_watchdog(loop: asyncio.AbstractEventLoop) -> None:
 # FastAPI App
 # ─────────────────────────────────────────────────────────────────────────────
 
+APP_VERSION = "1.1.0"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    loop = asyncio.get_running_loop()
+    asyncio.create_task(start_watchdog(loop))
+    log.info("Server started on http://%s:%d", HOST, PORT)
+    yield
+
+
 app = FastAPI(
-    title       = "TPF2 Echtzeit-Telemetrie",
-    description = "Zeigt Live-Daten aller Züge aus Transport Fever 2",
-    version     = "1.0.0",
+    title       = "TPF2 Real-Time Telemetry",
+    description = "Shows live data of all trains from Transport Fever 2",
+    version     = APP_VERSION,
+    lifespan    = lifespan,
 )
 
 app.add_middleware(
@@ -205,63 +224,54 @@ app.add_middleware(
     allow_headers     = ["*"],
 )
 
-# Statische Dateien (HTML/CSS/JS)
+# Static files (HTML/CSS/JS)
 _static_dir = Path(__file__).parent / "static"
 if _static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 
-# ─── Startup / Shutdown ──────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    loop = asyncio.get_running_loop()
-    asyncio.create_task(start_watchdog(loop))
-    log.info("Server gestartet auf http://%s:%d", HOST, PORT)
-
-
-# ─── REST-Endpunkte ──────────────────────────────────────────────────────────
+# ─── REST endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def root() -> HTMLResponse:
-    """Liefert die Haupt-Web-UI."""
+    """Serves the main web UI."""
     index = _static_dir / "index.html"
     if index.exists():
         return HTMLResponse(content=index.read_text(encoding="utf-8"))
-    return HTMLResponse("<h1>TPF2 Telemetrie</h1><p>static/index.html nicht gefunden.</p>")
+    return HTMLResponse("<h1>TPF2 Telemetry</h1><p>static/index.html not found.</p>")
 
 
 @app.get("/api/telemetry", response_class=JSONResponse)
 async def api_telemetry() -> JSONResponse:
-    """Gibt den aktuellen Telemetrie-Snapshot als JSON zurück."""
+    """Returns the current telemetry snapshot as JSON."""
     data = await store.get()
     return JSONResponse(content=data)
 
 
 @app.get("/api/vehicles", response_class=JSONResponse)
 async def api_vehicles() -> JSONResponse:
-    """Gibt nur die Fahrzeugliste zurück."""
+    """Returns only the vehicle list."""
     data = await store.get()
     return JSONResponse(content=data.get("vehicles", []))
 
 
 @app.get("/api/lines", response_class=JSONResponse)
 async def api_lines() -> JSONResponse:
-    """Gibt alle Linien zurück."""
+    """Returns all lines."""
     data = await store.get()
     return JSONResponse(content=data.get("lines", []))
 
 
 @app.get("/api/stations", response_class=JSONResponse)
 async def api_stations() -> JSONResponse:
-    """Gibt alle Stationen zurück."""
+    """Returns all stations."""
     data = await store.get()
     return JSONResponse(content=data.get("stations", []))
 
 
 @app.get("/api/stats", response_class=JSONResponse)
 async def api_stats() -> JSONResponse:
-    """Gibt Zusammenfassungsstatistiken zurück."""
+    """Returns summary statistics."""
     data = await store.get()
     return JSONResponse(content={
         "stats":       data.get("stats", {}),
@@ -273,7 +283,7 @@ async def api_stats() -> JSONResponse:
 
 @app.get("/api/health", response_class=JSONResponse)
 async def api_health() -> JSONResponse:
-    """Health-Check-Endpunkt."""
+    """Health-check endpoint."""
     age = time.time() - store.last_update if store.last_update else None
     return JSONResponse(content={
         "status":         "ok",
@@ -288,15 +298,15 @@ async def api_health() -> JSONResponse:
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     """
-    WebSocket-Verbindung für Live-Updates.
-    Sendet bei jeder Änderung der telemetry.json den vollständigen Snapshot.
+    WebSocket connection for live updates.
+    Sends the full snapshot on every telemetry.json change.
     """
     await ws.accept()
-    log.info("WebSocket verbunden: %s", ws.client)
+    log.info("WebSocket connected: %s", ws.client)
 
     queue = store.subscribe()
 
-    # Aktuellen Zustand sofort senden
+    # Send current state immediately
     current = await store.get()
     if current:
         try:
@@ -307,33 +317,33 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     try:
         while True:
             try:
-                # Auf nächste Aktualisierung warten (Timeout 30s für Keepalive)
+                # Wait for the next update (30 s timeout for keepalive)
                 raw = await asyncio.wait_for(queue.get(), timeout=30.0)
                 await ws.send_text(raw)
             except asyncio.TimeoutError:
-                # Keepalive-Ping
+                # Keepalive ping
                 try:
                     await ws.send_text(json.dumps({"type": "ping", "ts": time.time()}))
                 except Exception:
                     break
     except WebSocketDisconnect:
-        log.info("WebSocket getrennt: %s", ws.client)
+        log.info("WebSocket disconnected: %s", ws.client)
     except Exception as exc:
-        log.debug("WebSocket-Fehler: %s", exc)
+        log.debug("WebSocket error: %s", exc)
     finally:
         store.unsubscribe(queue)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Einstiegspunkt
+# Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     log.info("═" * 60)
-    log.info("  TPF2 Echtzeit-Telemetrie Server v1.0")
-    log.info("  Telemetrie-Datei : %s", TELEMETRY_PATH)
-    log.info("  Web-Interface    : http://%s:%d", HOST, PORT)
-    log.info("  API-Docs         : http://%s:%d/docs", HOST, PORT)
+    log.info("  TPF2 Real-Time Telemetry Server v%s", APP_VERSION)
+    log.info("  Telemetry file : %s", TELEMETRY_PATH)
+    log.info("  Web interface  : http://%s:%d", HOST, PORT)
+    log.info("  API docs       : http://%s:%d/docs", HOST, PORT)
     log.info("═" * 60)
 
     uvicorn.run(
