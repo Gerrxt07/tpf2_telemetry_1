@@ -1,5 +1,7 @@
 telemetry.json
 telemetry_diag.txt
+telemetry_signal_diag.txt
+telemetry_track_diag.txt
 telemetry_diag_runtime.txt
 server/__pycache__/server.cpython-311.pyc
 __pycache__/

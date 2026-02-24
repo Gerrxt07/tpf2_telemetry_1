@@ -515,22 +515,79 @@ local function getAllStationIds()
     return {}
 end
 
--- Get all BASE_EDGE entity IDs
-local function getAllEdgeIds()
-    -- game.interface.getEntities returns a map: { [entityId] = true, ... }
-    local result = getEntities({pos = {0, 0}, radius = 999999}, {type = "BASE_EDGE"})
-    if result and type(result) == "table" then
-        local ids = {}
-        for k, v in pairs(result) do
-            if type(k) == "number" and k > 0 then
-                ids[#ids+1] = k
-            elseif type(v) == "number" and v > 0 then
-                ids[#ids+1] = v
+-- Safe iteration helper: wraps pairs() in pcall for sol2 containers
+local function safePairs(tbl)
+    local keys = {}
+    -- Try pairs() first (works on normal Lua tables)
+    local ok = pcall(function()
+        for k, v in pairs(tbl) do
+            keys[#keys+1] = {k = k, v = v}
+        end
+    end)
+    if ok and #keys > 0 then return keys end
+
+    -- Try ipairs() fallback (works on array-like containers)
+    keys = {}
+    ok = pcall(function()
+        for i, v in ipairs(tbl) do
+            keys[#keys+1] = {k = i, v = v}
+        end
+    end)
+    if ok and #keys > 0 then return keys end
+
+    -- Try numeric indexing with # operator
+    keys = {}
+    ok = pcall(function()
+        local len = #tbl
+        if len and len > 0 then
+            for i = 1, len do
+                keys[#keys+1] = {k = i, v = tbl[i]}
             end
         end
-        if #ids > 0 then return ids end
+    end)
+    if ok and #keys > 0 then return keys end
+
+    -- Try raw iteration via next()
+    keys = {}
+    ok = pcall(function()
+        local k, v = next(tbl)
+        while k ~= nil do
+            keys[#keys+1] = {k = k, v = v}
+            k, v = next(tbl, k)
+        end
+    end)
+    if ok and #keys > 0 then return keys end
+
+    return keys
+end
+
+-- Get all BASE_EDGE entity IDs
+local function getAllEdgeIds()
+    -- Try the helper function first
+    local result = getEntities({pos = {0, 0}, radius = 999999}, {type = "BASE_EDGE"})
+
+    -- Also try direct call if helper returned nil
+    if not result and gi() and gi().getEntities then
+        local ok_direct, r_direct = pcall(gi().getEntities, {pos = {0, 0}, radius = 999999}, {type = "BASE_EDGE"})
+        if ok_direct and r_direct then
+            result = r_direct
+        end
     end
-    return {}
+
+    if not result then return {} end
+
+    -- Use safePairs to handle both Lua tables and sol2 containers
+    local entries = safePairs(result)
+    local ids = {}
+    for _, entry in ipairs(entries) do
+        local k, v = entry.k, entry.v
+        if type(k) == "number" and k > 0 then
+            ids[#ids+1] = k
+        elseif type(v) == "number" and v > 0 then
+            ids[#ids+1] = v
+        end
+    end
+    return ids
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -794,32 +851,164 @@ local function tnEdgeToPoints(geom)
     return nil
 end
 
+local _trackDiagWritten = false
+
 local function collectTracks()
     local tracks = {}
+    local diagPath = _outputPath and _outputPath:gsub("telemetry%.json$", "") or ""
+    local diagLines = {}
+    local writeDiagLine = function(line)
+        diagLines[#diagLines+1] = tostring(line)
+    end
 
+    local shouldDiag = not _trackDiagWritten
+
+    if shouldDiag then
+        writeDiagLine("=== Track Collection Diagnostic ===")
+        writeDiagLine("Time: write_count=" .. tostring(_callCounter))
+        writeDiagLine("")
+    end
+
+    -- Step 1: Get edge IDs
     local edgeIds = getAllEdgeIds()
-    if #edgeIds == 0 then return tracks end
 
-    -- Use entity data directly (proven to work from diagnostics).
-    -- Each edge entity has: .node0, .node1, .node0pos, .node1pos,
-    --   .node0tangent, .node1tangent, .track (bool), .hasTram (bool), .hasBus (bool)
-    for _, edgeId in ipairs(edgeIds) do
+    if shouldDiag then
+        writeDiagLine("Edge IDs found: " .. #edgeIds)
+        if #edgeIds == 0 then
+            -- Extra debug: try direct API call
+            writeDiagLine("")
+            writeDiagLine("--- Direct getEntities debug ---")
+            if gi() then
+                writeDiagLine("game.interface: AVAILABLE")
+                if gi().getEntities then
+                    writeDiagLine("gi.getEntities: " .. type(gi().getEntities))
+                    local ok_d, r_d = pcall(gi().getEntities, {pos = {0, 0}, radius = 999999}, {type = "BASE_EDGE"})
+                    writeDiagLine("pcall result: ok=" .. tostring(ok_d) .. " type=" .. tostring(type(r_d)))
+                    if ok_d and r_d then
+                        writeDiagLine("result type(r): " .. type(r_d))
+                        -- Try different iteration methods
+                        local count_p = 0
+                        pcall(function() for k in pairs(r_d) do count_p = count_p + 1 end end)
+                        writeDiagLine("pairs count: " .. count_p)
+                        local count_i = 0
+                        pcall(function() for i, v in ipairs(r_d) do count_i = count_i + 1 end end)
+                        writeDiagLine("ipairs count: " .. count_i)
+                        local count_n = 0
+                        pcall(function() count_n = #r_d end)
+                        writeDiagLine("#r_d = " .. tostring(count_n))
+                        -- Try index access
+                        local first_key = nil
+                        pcall(function() first_key = next(r_d) end)
+                        writeDiagLine("next(r_d) = " .. tostring(first_key) .. " type=" .. type(first_key))
+                    else
+                        writeDiagLine("getEntities error: " .. tostring(r_d))
+                    end
+                else
+                    writeDiagLine("gi.getEntities: NOT AVAILABLE")
+                end
+            else
+                writeDiagLine("game.interface: NOT AVAILABLE")
+            end
+        end
+    end
+
+    if #edgeIds == 0 then
+        if shouldDiag then
+            _trackDiagWritten = true
+            pcall(function()
+                local f = io.open(diagPath .. "telemetry_track_diag.txt", "w")
+                if f then f:write(table.concat(diagLines, "\n")); f:close() end
+            end)
+        end
+        return tracks
+    end
+
+    -- Step 2: Process edges
+    local skipStats = {no_entity = 0, no_track = 0, no_pos = 0, added = 0, error = 0}
+
+    if shouldDiag then
+        writeDiagLine("")
+        writeDiagLine("--- First 5 edge entities ---")
+    end
+
+    for idx, edgeId in ipairs(edgeIds) do
         local ok2, edge = pcall(getEntity, edgeId)
-        if not ok2 or not edge then goto continue_edge end
 
-        -- Determine type from entity fields
-        local isTrack = edge.track == true
-        local isTram  = edge.hasTram == true
+        if not ok2 then
+            skipStats.error = skipStats.error + 1
+            if shouldDiag and idx <= 5 then
+                writeDiagLine("Edge " .. edgeId .. ": pcall ERROR: " .. tostring(edge))
+            end
+            goto continue_edge
+        end
 
-        -- Skip non-rail/non-tram edges (roads, waterways, etc.)
-        if not isTrack and not isTram then goto continue_edge end
+        if not edge then
+            skipStats.no_entity = skipStats.no_entity + 1
+            if shouldDiag and idx <= 5 then
+                writeDiagLine("Edge " .. edgeId .. ": getEntity returned nil")
+            end
+            goto continue_edge
+        end
+
+        -- Log first few edge entities for diagnosis
+        if shouldDiag and idx <= 5 then
+            writeDiagLine("Edge " .. edgeId .. ": entity type=" .. type(edge))
+            local edgeEntries = safePairs(edge)
+            for _, entry in ipairs(edgeEntries) do
+                local vs = tostring(entry.v)
+                if #vs > 60 then vs = vs:sub(1, 60) .. "..." end
+                writeDiagLine("  ." .. tostring(entry.k) .. " = " .. vs .. " (" .. type(entry.v) .. ")")
+            end
+        end
+
+        -- Determine type from entity fields - be flexible with truthy checks
+        local isTrack = false
+        local isTram = false
+
+        -- Check track field (could be boolean, number, or string)
+        local trackField = edge.track
+        if trackField == true or trackField == 1 or trackField == "true" then
+            isTrack = true
+        end
+
+        -- Check hasTram field
+        local tramField = edge.hasTram
+        if tramField == true or tramField == 1 or tramField == "true" then
+            isTram = true
+        end
+
+        -- Also check edgeType or type fields as alternative
+        if not isTrack and not isTram then
+            local et = edge.edgeType or edge.type
+            if et == "RAIL" or et == "rail" or et == 1 then isTrack = true end
+            if et == "TRAM" or et == "tram" or et == 2 then isTram = true end
+        end
+
+        -- Also check edgeTypeName or trackType
+        if not isTrack and not isTram then
+            local tn = edge.edgeTypeName or edge.trackType or ""
+            if type(tn) == "string" then
+                local tnl = tn:lower()
+                if tnl:find("rail") or tnl:find("track") then isTrack = true end
+                if tnl:find("tram") then isTram = true end
+            end
+        end
+
+        -- Skip non-rail/non-tram edges
+        if not isTrack and not isTram then
+            skipStats.no_track = skipStats.no_track + 1
+            goto continue_edge
+        end
 
         local edgeType = isTrack and "RAIL" or "TRAM"
 
-        -- Extract node positions from entity (these are tables with x,y,z)
+        -- Extract node positions from entity
         local n0p = edge.node0pos
         local n1p = edge.node1pos
-        if not n0p or not n1p then goto continue_edge end
+        if not n0p or not n1p then
+            skipStats.no_pos = skipStats.no_pos + 1
+            goto continue_edge
+        end
 
         local p0 = {x = safeFloat(n0p.x or n0p[1] or 0), y = safeFloat(n0p.y or n0p[2] or 0)}
         local p1 = {x = safeFloat(n1p.x or n1p[1] or 0), y = safeFloat(n1p.y or n1p[2] or 0)}
@@ -832,7 +1021,6 @@ local function collectTracks()
         if t0 and t1 then
             local tg0 = {x = safeFloat(t0.x or t0[1] or 0), y = safeFloat(t0.y or t0[2] or 0)}
             local tg1 = {x = safeFloat(t1.x or t1[1] or 0), y = safeFloat(t1.y or t1[2] or 0)}
-            -- Only use Hermite if tangents are non-zero (otherwise straight line)
             local tLen0 = tg0.x * tg0.x + tg0.y * tg0.y
             local tLen1 = tg1.x * tg1.x + tg1.y * tg1.y
             if tLen0 > 0.01 or tLen1 > 0.01 then
@@ -850,10 +1038,35 @@ local function collectTracks()
                 points = edgePoints,
                 type   = edgeType,
             }
+            skipStats.added = skipStats.added + 1
         end
 
         ::continue_edge::
     end
+
+    if shouldDiag then
+        writeDiagLine("")
+        writeDiagLine("--- Results ---")
+        writeDiagLine("Total edges:  " .. #edgeIds)
+        writeDiagLine("Added:        " .. skipStats.added)
+        writeDiagLine("No entity:    " .. skipStats.no_entity)
+        writeDiagLine("No track:     " .. skipStats.no_track)
+        writeDiagLine("No position:  " .. skipStats.no_pos)
+        writeDiagLine("Errors:       " .. skipStats.error)
+        writeDiagLine("Track result: " .. #tracks)
+
+        _trackDiagWritten = true
+        pcall(function()
+            local f = io.open(diagPath .. "telemetry_track_diag.txt", "w")
+            if f then f:write(table.concat(diagLines, "\n")); f:close() end
+        end)
+    end
+
+    print("[TPF2-Telemetry] collectTracks: " .. #edgeIds .. " edges, "
+        .. skipStats.added .. " tracks, "
+        .. skipStats.no_entity .. " nil, "
+        .. skipStats.no_track .. " non-rail, "
+        .. skipStats.error .. " err")
 
     return tracks
 end
@@ -862,27 +1075,73 @@ end
 -- Signal collection
 -- ─────────────────────────────────────────────────────────────────────────────
 
+local _signalDiagWritten = false
+
 local function collectSignals()
     local signals = {}
     local seen = {}
+    local diagPath = _outputPath and _outputPath:gsub("telemetry%.json$", "") or ""
+    local diagLines = {}
+    local shouldDiag = not _signalDiagWritten
+    local writeDiagLine = function(line) diagLines[#diagLines+1] = tostring(line) end
+
+    if shouldDiag then
+        writeDiagLine("=== Signal Collection Diagnostic ===")
+        writeDiagLine("Time: write_count=" .. tostring(_callCounter))
+        writeDiagLine("")
+    end
 
     local CT_SIGNAL_LIST = resolveComponentType("SIGNAL_LIST")
     local edgeIds = getAllEdgeIds()
 
+    if shouldDiag then
+        writeDiagLine("CT_SIGNAL_LIST = " .. tostring(CT_SIGNAL_LIST))
+        writeDiagLine("Edge IDs: " .. #edgeIds)
+    end
+
     -- Method 1: scan edges for SIGNAL_LIST component
-    -- Use entity data for edge positions (proven to work)
     if CT_SIGNAL_LIST and #edgeIds > 0 then
-        for _, edgeId in ipairs(edgeIds) do
+        local sigListFound = 0
+
+        for edgeIdx, edgeId in ipairs(edgeIds) do
             local sigList = getComponent(edgeId, CT_SIGNAL_LIST)
             if not sigList then goto continue_sig_edge end
 
-            -- Get signal array from the component
+            sigListFound = sigListFound + 1
+
+            -- Get signal array from the component - use safePairs for sol2 safety
             local sigArray = nil
             if type(sigList) == "table" then
                 sigArray = sigList.signals or sigList
-                if type(sigArray) ~= "table" then goto continue_sig_edge end
-            else
-                goto continue_sig_edge
+            elseif type(sigList) == "userdata" then
+                local ok_sf, sf = pcall(function() return sigList.signals end)
+                if ok_sf and sf then
+                    sigArray = sf
+                else
+                    sigArray = sigList
+                end
+            end
+
+            if not sigArray then goto continue_sig_edge end
+
+            -- Log first few signal lists for diagnosis
+            if shouldDiag and sigListFound <= 3 then
+                writeDiagLine("")
+                writeDiagLine("Edge " .. edgeId .. " SIGNAL_LIST: type=" .. type(sigList))
+                writeDiagLine("  sigArray type: " .. type(sigArray))
+                local entries = safePairs(sigArray)
+                writeDiagLine("  entries count: " .. #entries)
+                for ei, entry in ipairs(entries) do
+                    if ei <= 3 then
+                        writeDiagLine("  [" .. tostring(entry.k) .. "] = " .. tostring(entry.v) .. " (" .. type(entry.v) .. ")")
+                        if type(entry.v) == "table" then
+                            local subEntries = safePairs(entry.v)
+                            for _, se in ipairs(subEntries) do
+                                writeDiagLine("    ." .. tostring(se.k) .. " = " .. tostring(se.v))
+                            end
+                        end
+                    end
+                end
             end
 
             -- Get edge node positions directly from entity
@@ -907,13 +1166,17 @@ local function collectSignals()
                 end
             end
 
-            -- Process each signal in the list
+            -- Process each signal in the list using safePairs
             local idx = 0
-            for sigKey, sig in pairs(sigArray) do
+            local sigEntries = safePairs(sigArray)
+            for _, sigEntry in ipairs(sigEntries) do
+                local sig = sigEntry.v
                 idx = idx + 1
-                if type(sig) ~= "table" then goto continue_sig end
+                if type(sig) ~= "table" and type(sig) ~= "userdata" then goto continue_sig end
 
-                local param = safeFloat(sig.param or sig.position or 0.5, 4)
+                local param = 0.5
+                pcall(function() param = safeFloat(sig.param or sig.position or 0.5, 4) end)
+
                 local pos = {x = 0, y = 0, z = 0}
                 if node0Pos and node1Pos then
                     pos = {
@@ -925,7 +1188,9 @@ local function collectSignals()
                     pos = {x = node0Pos.x, y = node0Pos.y, z = node0Pos.z or 0}
                 end
 
-                local state = safeInt(sig.state or sig.signalState or sig.mainState or sig.aspect or 0)
+                local state = 0
+                pcall(function() state = safeInt(sig.state or sig.signalState or sig.mainState or sig.aspect or 0) end)
+
                 local sigUid = edgeId * 1000 + idx
                 if not seen[sigUid] then
                     seen[sigUid] = true
@@ -940,15 +1205,39 @@ local function collectSignals()
 
             ::continue_sig_edge::
         end
+
+        if shouldDiag then
+            writeDiagLine("")
+            writeDiagLine("Method 1 results: sigListFound=" .. sigListFound .. " signals=" .. #signals)
+        end
     end
 
     -- Method 2: signal system subsystem
     if #signals == 0 and api and api.engine and api.engine.system then
-        local sigSys = api.engine.system.signalSystem
+        local sigSys = nil
+        pcall(function() sigSys = api.engine.system.signalSystem end)
+
+        if shouldDiag then
+            writeDiagLine("")
+            writeDiagLine("--- Method 2: signalSystem ---")
+            writeDiagLine("signalSystem: " .. tostring(sigSys ~= nil) .. " type=" .. type(sigSys))
+        end
+
         if sigSys then
-            -- Try getSignal on each edge (both directions)
-            local getSignalFn = sigSys.getSignal
+            local getSignalFn = nil
+            pcall(function() getSignalFn = sigSys.getSignal end)
+
+            if shouldDiag then
+                writeDiagLine("getSignal: " .. tostring(getSignalFn ~= nil) .. " type=" .. type(getSignalFn))
+                local sysMethods = safePairs(sigSys)
+                writeDiagLine("signalSystem fields (" .. #sysMethods .. "):")
+                for _, entry in ipairs(sysMethods) do
+                    writeDiagLine("  ." .. tostring(entry.k) .. " = " .. type(entry.v))
+                end
+            end
+
             if getSignalFn and #edgeIds > 0 then
+                local sigFound = 0
                 for _, edgeId in ipairs(edgeIds) do
                     for _, reversed in ipairs({false, true}) do
                         local ok2, sigId = pcall(function() return getSignalFn(edgeId, reversed) end)
@@ -956,7 +1245,7 @@ local function collectSignals()
                             local sid = toEntityId(sigId)
                             if sid ~= 0 and not seen[sid] then
                                 seen[sid] = true
-                                -- Get position from edge entity
+                                sigFound = sigFound + 1
                                 local edgeEnt = getEntity(edgeId)
                                 local sigPos = {x = 0, y = 0, z = 0}
                                 if edgeEnt and edgeEnt.node0pos then
@@ -977,8 +1266,21 @@ local function collectSignals()
                         end
                     end
                 end
+                if shouldDiag then
+                    writeDiagLine("Method 2 results: sigFound=" .. sigFound)
+                end
             end
         end
+    end
+
+    if shouldDiag then
+        writeDiagLine("")
+        writeDiagLine("Total signals: " .. #signals)
+        _signalDiagWritten = true
+        pcall(function()
+            local f = io.open(diagPath .. "telemetry_signal_diag.txt", "w")
+            if f then f:write(table.concat(diagLines, "\n")); f:close() end
+        end)
     end
 
     return signals
@@ -1144,15 +1446,19 @@ local function collectVehicles()
         local passengers, capacity, cargo, cargo_cap = 0, 0, 0, 0
         if type(ent.cargoLoad) == "table" then
             passengers = safeInt(ent.cargoLoad.PASSENGERS or ent.cargoLoad.passengers or 0)
-            for k, v in pairs(ent.cargoLoad) do
-                if k ~= "PASSENGERS" and k ~= "passengers" then cargo = cargo + safeInt(v) end
-            end
+            pcall(function()
+                for k, v in pairs(ent.cargoLoad) do
+                    if k ~= "PASSENGERS" and k ~= "passengers" then cargo = cargo + safeInt(v) end
+                end
+            end)
         end
         if type(ent.capacities) == "table" then
             capacity = safeInt(ent.capacities.PASSENGERS or ent.capacities.passengers or 0)
-            for k, v in pairs(ent.capacities) do
-                if k ~= "PASSENGERS" and k ~= "passengers" then cargo_cap = cargo_cap + safeInt(v) end
-            end
+            pcall(function()
+                for k, v in pairs(ent.capacities) do
+                    if k ~= "PASSENGERS" and k ~= "passengers" then cargo_cap = cargo_cap + safeInt(v) end
+                end
+            end)
         end
 
         local state = safeStr(ent.state or "UNKNOWN")
@@ -1440,6 +1746,8 @@ function collector.onGameReady()
     local diagPath = _outputPath:gsub("telemetry%.json$", "")
     writeDiag(diagPath, "telemetry_diag_runtime.txt")
     _diagWritten = false
+    _trackDiagWritten = false
+    _signalDiagWritten = false
     _trackCache = nil
     _signalCache = nil
     _trackCacheAge = 999
