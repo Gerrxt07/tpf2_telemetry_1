@@ -49,21 +49,23 @@ end
 
 function data()
     return {
-        -- Sicherstellen, dass der Collector beim Laden initialisiert wird
         load = function()
             ensureCollector()
         end,
 
-        -- Regelmaessiger Tick im Engine-State
+        -- update() läuft im eingeschränkten Simulations-Thread. 
+        -- Hier lesen wir keine Daten mehr aus, um die API-Blockade zu umgehen.
         update = function()
-            if ensureCollector() and collector and collector.onTick then
-                pcall(collector.onTick, 0.25)
-            end
+            ensureCollector()
         end,
 
-        -- GUI-State: nur initialisieren, kein zweiter Tick (vermeidet doppelte Schreibvorgaenge)
+        -- guiUpdate() läuft im GUI-Thread. Hier ist api.engine vollständig verfügbar!
         guiUpdate = function()
-            ensureCollector()
+            if ensureCollector() and collector and collector.onTick then
+                -- guiUpdate feuert jeden Frame (z.B. 60x pro Sekunde). 
+                -- Wir übergeben ca. 1/60 als Zeit-Delta (0.016 Sekunden).
+                pcall(collector.onTick, 0.016)
+            end
         end,
 
         guiInit = function()

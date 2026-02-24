@@ -233,6 +233,13 @@ let _activeView    = "list";
 let _lastMapData   = null;
 const MAP_ZOOM_MIN = 0.5;
 const MAP_ZOOM_MAX = 8;
+let _mapHitTargets = [];
+let _mapHover      = null;
+const _mapUi = {
+  showStationLabels: true,
+  showVehicleLabels: false,
+  spreadOverlaps: true,
+};
 let _mapViewState  = {
   zoom: 1,
   panX: 0,
@@ -258,6 +265,12 @@ const listView      = document.getElementById("list-view");
 const mapView       = document.getElementById("map-view");
 const mapCanvas     = document.getElementById("telemetryMap");
 const mapCtx        = mapCanvas ? mapCanvas.getContext("2d") : null;
+const mapTooltip    = document.getElementById("map-tooltip");
+const mapFitBtn     = document.getElementById("map-fit-btn");
+const mapResetBtn   = document.getElementById("map-reset-btn");
+const mapToggleStationLabels = document.getElementById("map-toggle-station-labels");
+const mapToggleVehicleLabels = document.getElementById("map-toggle-vehicle-labels");
+const mapToggleSpread        = document.getElementById("map-toggle-spread");
 
 // ─── Utility ──────────────────────────────────────────────────────────────────
 const esc = s => String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -560,6 +573,50 @@ function buildInferredSignals(data) {
   return inferred;
 }
 
+function hideMapTooltip() {
+  if (!mapTooltip) return;
+  mapTooltip.classList.add("hidden");
+}
+
+function showMapTooltip(x, y, html) {
+  if (!mapTooltip || !mapCanvas || !mapView || !html) return;
+  const rect = mapCanvas.getBoundingClientRect();
+  mapTooltip.innerHTML = html;
+  mapTooltip.classList.remove("hidden");
+
+  const left = Math.max(8, Math.min(rect.width - 260, x + 12));
+  const top  = Math.max(8, Math.min(rect.height - 80, y + 12));
+  mapTooltip.style.left = `${left}px`;
+  mapTooltip.style.top  = `${top}px`;
+}
+
+function mapLabelCanPlace(placed, x, y, w, h) {
+  for (const b of placed) {
+    const noOverlap = x + w < b.x || b.x + b.w < x || y + h < b.y || b.y + b.h < y;
+    if (!noOverlap) return false;
+  }
+  placed.push({ x, y, w, h });
+  return true;
+}
+
+function describeMapTarget(target) {
+  if (!target) return "";
+  if (target.kind === "vehicle") {
+    return `<strong>${esc(target.name || "Vehicle")}</strong><br>${esc(target.line_name || "")}`;
+  }
+  if (target.kind === "station") {
+    return `<strong>${esc(target.label || "Station")}</strong>${target.count > 1 ? `<br>${target.count} stops` : ""}`;
+  }
+  if (target.kind === "signal") {
+    if (target.inferred) return `<strong>Inferred signal/junction</strong>`;
+    return `<strong>Signal</strong><br>${Number(target.state) === 1 ? "Proceed" : "Stop"}`;
+  }
+  if (target.kind === "cluster") {
+    return `<strong>${target.count} vehicles</strong>`;
+  }
+  return "";
+}
+
 function computeBounds(data) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const consider = (pt) => {
@@ -611,6 +668,7 @@ function resizeCanvasToDisplay() {
 function drawMap(data) {
   _lastMapData = data;
   if (_activeView !== "map" || !mapCtx || !mapCanvas || !data) return;
+  _mapHitTargets = [];
 
   const size   = resizeCanvasToDisplay();
   const width  = size.width;
@@ -618,6 +676,23 @@ function drawMap(data) {
 
   mapCtx.fillStyle = "#1e1e1e";
   mapCtx.fillRect(0, 0, width, height);
+
+  // subtle grid for orientation
+  mapCtx.strokeStyle = "rgba(148,163,184,.08)";
+  mapCtx.lineWidth = 1;
+  const grid = 80;
+  for (let x = 0; x < width; x += grid) {
+    mapCtx.beginPath();
+    mapCtx.moveTo(x, 0);
+    mapCtx.lineTo(x, height);
+    mapCtx.stroke();
+  }
+  for (let y = 0; y < height; y += grid) {
+    mapCtx.beginPath();
+    mapCtx.moveTo(0, y);
+    mapCtx.lineTo(width, y);
+    mapCtx.stroke();
+  }
 
   const bounds = computeBounds(data);
   if (!bounds) return;
@@ -682,6 +757,8 @@ function drawMap(data) {
     mapCtx.lineWidth = 1;
     mapCtx.arc(pr.x, pr.y, 4.5, 0, Math.PI * 2);
     mapCtx.stroke();
+
+    _mapHitTargets.push({ kind: "signal", id: s.id, x: pr.x, y: pr.y, r: 7, state: s.state, inferred: Boolean(s.inferred) });
   }
 
   const stopNameOverrides = getMapStopNameOverrides(data);
@@ -690,15 +767,25 @@ function drawMap(data) {
   const stationRenderItems = resolveStationRenderItems(data, project, stopNameOverrides);
   mapCtx.font = "10px 'Inter', system-ui, sans-serif";
   mapCtx.textBaseline = "middle";
+  mapCtx.textAlign = "left";
+  const placedLabels = [];
   for (const st of stationRenderItems) {
     mapCtx.fillStyle = "#d1d5db";
     mapCtx.fillRect(st.x - 3, st.y - 3, 6, 6);
-    if (st.label) {
+
+    _mapHitTargets.push({ kind: "station", id: `${Math.round(st.x)}:${Math.round(st.y)}`, x: st.x, y: st.y, r: 8, label: st.label, count: st.count });
+
+    if (_mapUi.showStationLabels && st.label) {
+      const tx = st.x + 6;
+      const ty = st.y;
+      const textW = mapCtx.measureText(st.label).width + (st.count > 1 ? 26 : 0);
+      if (!mapLabelCanPlace(placedLabels, tx - 1, ty - 6, textW + 2, 12)) continue;
+
       mapCtx.fillStyle = "#ffffff";
-      mapCtx.fillText(st.label, st.x + 6, st.y);
+      mapCtx.fillText(st.label, tx, ty);
       if (st.count > 1) {
         mapCtx.fillStyle = "#9ca3af";
-        mapCtx.fillText(`(${st.count})`, st.x + 6 + (st.label.length * 6.2), st.y);
+        mapCtx.fillText(`(${st.count})`, tx + mapCtx.measureText(st.label).width + 4, ty);
       }
     }
   }
@@ -721,6 +808,7 @@ function drawMap(data) {
     vehicleMarkers.push({
       id: v.id,
       name: v.name,
+      line_name: v.line_name,
       type: getVehicleType(v),
       x: pr.x,
       y: pr.y,
@@ -729,25 +817,40 @@ function drawMap(data) {
     });
   }
 
-  const spread = spreadVehicleMarkers(vehicleMarkers);
+  const spread = _mapUi.spreadOverlaps
+    ? spreadVehicleMarkers(vehicleMarkers)
+    : { markers: vehicleMarkers, clusters: clusterByDistance(vehicleMarkers, 10) };
 
   mapCtx.font = "12px 'Inter', system-ui, sans-serif";
+  mapCtx.textAlign = "left";
+  const placedVehicleLabels = [];
   for (const v of spread.markers) {
     const color = v.type === "RAIL" ? "#ff6666" : v.type === "ROAD" ? "#3b82f6" : "#ffffff";
+    const isHover = _mapHover && _mapHover.kind === "vehicle" && String(_mapHover.id) === String(v.id);
     mapCtx.beginPath();
     mapCtx.fillStyle = color;
-    mapCtx.arc(v.drawX, v.drawY, 4, 0, Math.PI * 2);
+    mapCtx.arc(v.drawX, v.drawY, isHover ? 5.8 : 4, 0, Math.PI * 2);
     mapCtx.fill();
-    if (v.name) {
+
+    _mapHitTargets.push({ kind: "vehicle", id: v.id, x: v.drawX, y: v.drawY, r: 8, name: v.name, line_name: v.line_name });
+
+    const showLabel = (isHover || (_mapUi.showVehicleLabels && _mapViewState.zoom >= 1.6));
+    if (showLabel && v.name) {
+      const tx = v.drawX + 7;
+      const ty = v.drawY;
+      const tw = mapCtx.measureText(v.name).width;
+      if (!mapLabelCanPlace(placedVehicleLabels, tx - 1, ty - 7, tw + 2, 14)) continue;
       mapCtx.fillStyle = "#ffffff";
-      mapCtx.fillText(v.name, v.drawX + 6, v.drawY);
+      mapCtx.fillText(v.name, tx, ty);
     }
   }
 
   // Cluster count hint for overlapping trains
   mapCtx.font = "10px 'Inter', system-ui, sans-serif";
+  mapCtx.textAlign = "center";
   for (const c of spread.clusters) {
     if (c.items.length <= 1) continue;
+    if (!_mapUi.spreadOverlaps) continue;
     mapCtx.fillStyle = "rgba(17,24,39,0.85)";
     mapCtx.beginPath();
     mapCtx.arc(c.cx, c.cy, 7, 0, Math.PI * 2);
@@ -756,8 +859,10 @@ function drawMap(data) {
     mapCtx.textAlign = "center";
     mapCtx.textBaseline = "middle";
     mapCtx.fillText(String(c.items.length), c.cx, c.cy + 0.5);
+
+    _mapHitTargets.push({ kind: "cluster", id: `${Math.round(c.cx)}:${Math.round(c.cy)}`, x: c.cx, y: c.cy, r: 9, count: c.items.length });
   }
-  mapCtx.textAlign = "start";
+  mapCtx.textAlign = "left";
   mapCtx.textBaseline = "middle";
 }
 
@@ -776,6 +881,49 @@ function setMapDragging(dragging) {
   _mapViewState.dragging = dragging;
   mapCanvas?.classList.toggle("dragging", dragging);
 }
+
+function findMapTargetAt(x, y) {
+  let best = null;
+  let bestD2 = Infinity;
+  for (const t of _mapHitTargets) {
+    const dx = x - t.x;
+    const dy = y - t.y;
+    const d2 = dx * dx + dy * dy;
+    const r = Number(t.r || 0);
+    if (d2 <= r * r && d2 < bestD2) {
+      best = t;
+      bestD2 = d2;
+    }
+  }
+  return best;
+}
+
+function fitMapView() {
+  resetMapView();
+}
+
+if (mapToggleStationLabels) mapToggleStationLabels.checked = _mapUi.showStationLabels;
+if (mapToggleVehicleLabels) mapToggleVehicleLabels.checked = _mapUi.showVehicleLabels;
+if (mapToggleSpread)        mapToggleSpread.checked        = _mapUi.spreadOverlaps;
+
+mapFitBtn?.addEventListener("click", () => {
+  fitMapView();
+});
+mapResetBtn?.addEventListener("click", () => {
+  resetMapView();
+});
+mapToggleStationLabels?.addEventListener("change", (e) => {
+  _mapUi.showStationLabels = Boolean(e.target?.checked);
+  drawMap(_lastMapData || _state);
+});
+mapToggleVehicleLabels?.addEventListener("change", (e) => {
+  _mapUi.showVehicleLabels = Boolean(e.target?.checked);
+  drawMap(_lastMapData || _state);
+});
+mapToggleSpread?.addEventListener("change", (e) => {
+  _mapUi.spreadOverlaps = Boolean(e.target?.checked);
+  drawMap(_lastMapData || _state);
+});
 
 if (mapCanvas) {
   mapCanvas.addEventListener("wheel", (e) => {
@@ -810,16 +958,31 @@ if (mapCanvas) {
   });
 
   mapCanvas.addEventListener("pointermove", (e) => {
-    if (_activeView !== "map" || !_mapViewState.dragging) return;
-    if (_mapViewState.pointerId != null && e.pointerId !== _mapViewState.pointerId) return;
+    if (_activeView !== "map") return;
 
-    const dx = e.clientX - _mapViewState.lastX;
-    const dy = e.clientY - _mapViewState.lastY;
-    _mapViewState.lastX = e.clientX;
-    _mapViewState.lastY = e.clientY;
-    _mapViewState.panX += dx;
-    _mapViewState.panY += dy;
+    if (_mapViewState.dragging) {
+      if (_mapViewState.pointerId != null && e.pointerId !== _mapViewState.pointerId) return;
 
+      const dx = e.clientX - _mapViewState.lastX;
+      const dy = e.clientY - _mapViewState.lastY;
+      _mapViewState.lastX = e.clientX;
+      _mapViewState.lastY = e.clientY;
+      _mapViewState.panX += dx;
+      _mapViewState.panY += dy;
+
+      drawMap(_lastMapData || _state);
+      hideMapTooltip();
+      return;
+    }
+
+    const rect = mapCanvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const hit = findMapTargetAt(x, y);
+    _mapHover = hit || null;
+    mapCanvas.classList.toggle("hovering", Boolean(hit));
+    if (hit) showMapTooltip(x, y, describeMapTarget(hit));
+    else hideMapTooltip();
     drawMap(_lastMapData || _state);
   });
 
@@ -832,6 +995,12 @@ if (mapCanvas) {
   mapCanvas.addEventListener("pointerup", endDrag);
   mapCanvas.addEventListener("pointercancel", endDrag);
   mapCanvas.addEventListener("lostpointercapture", endDrag);
+  mapCanvas.addEventListener("pointerleave", () => {
+    _mapHover = null;
+    mapCanvas.classList.remove("hovering");
+    hideMapTooltip();
+    if (_activeView === "map") drawMap(_lastMapData || _state);
+  });
   mapCanvas.addEventListener("dblclick", () => resetMapView());
 }
 
@@ -840,6 +1009,11 @@ function setView(view) {
   viewTabs.forEach(btn => btn.classList.toggle("active", (btn.dataset.view || "list") === _activeView));
   if (listView) listView.classList.toggle("hidden", _activeView !== "list");
   if (mapView)  mapView.classList.toggle("hidden", _activeView !== "map");
+  if (_activeView !== "map") {
+    _mapHover = null;
+    hideMapTooltip();
+    mapCanvas?.classList.remove("hovering");
+  }
   if (_activeView === "map") {
     drawMap(_lastMapData || _state);
   }

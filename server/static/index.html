@@ -393,7 +393,19 @@
 
     <div id="map-view" class="hidden">
       <div class="map-container rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden">
+        <div class="map-toolbar" id="map-toolbar">
+          <div class="map-toolbar-left">
+            <button class="map-btn" id="map-fit-btn" type="button">Fit</button>
+            <button class="map-btn" id="map-reset-btn" type="button">Reset</button>
+          </div>
+          <div class="map-toolbar-right">
+            <label class="map-toggle"><input id="map-toggle-station-labels" type="checkbox" checked />Stations</label>
+            <label class="map-toggle"><input id="map-toggle-vehicle-labels" type="checkbox" />Vehicles</label>
+            <label class="map-toggle"><input id="map-toggle-spread" type="checkbox" checked />Spread overlap</label>
+          </div>
+        </div>
         <canvas id="telemetryMap"></canvas>
+        <div id="map-tooltip" class="map-tooltip hidden"></div>
       </div>
     </div>
   </div>
