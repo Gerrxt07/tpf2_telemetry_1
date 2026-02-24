@@ -742,7 +742,16 @@ end
 
 local function collectLinePath(lineId, lineStops)
     local points = {}
-    local tn = api and api.engine and api.engine.system and api.engine.system.transportNetwork
+    
+    -- NEU: System über Vanilla oder CommonAPI2 holen, um die API-Sperre zu umgehen
+    local sys = nil
+    if api and api.engine and api.engine.system then sys = api.engine.system end
+    if (not sys) and type(commonapi) == "table" and commonapi.engine and commonapi.engine.system then 
+        sys = commonapi.engine.system 
+    end
+    
+    local tn = sys and sys.transportNetwork
+    
     if tn then
         local ldata = safeCall(tn.getLine, lineId)
                   or safeCall(tn.getLineObject, lineId)
@@ -769,6 +778,7 @@ local function collectLinePath(lineId, lineStops)
         end
     end
 
+    -- Fallback für Luftlinien, falls wirklich nichts gefunden wurde
     if #points == 0 and type(lineStops) == "table" then
         for _, s in ipairs(lineStops) do
             local pos = nil
@@ -938,141 +948,27 @@ end
 local function collectSignals()
     local signals = {}
     local seen = {}
-    local candidateEntityIds = {}
-
-    local function addCandidate(id)
-        local n = toEntityId(id)
-        if n ~= 0 then candidateEntityIds[n] = true end
-    end
 
     local function addSignalId(id)
         local sid = toEntityId(id)
         if sid ~= 0 then seen[sid] = true end
     end
 
-    local function scanSignalIds(val, depth, keyHint, visited)
-        depth = depth or 0
-        visited = visited or {}
-        if depth > 7 then return end
-
-        local t = type(val)
-        if t == "number" then
-            if keyHint and keyHint:find("signal") then addSignalId(val) end
-            return
-        end
-        if t ~= "table" then return end
-        if visited[val] then return end
-        visited[val] = true
-
-        for k, v in pairs(val) do
-            local ks = tostring(k):lower()
-            if type(v) == "number" then
-                if ks:find("signal") then
-                    addSignalId(v)
+    -- NEU: Brute-Force Suche für Signale (funktioniert immer im GUI-Script!)
+    if api and api.engine and api.engine.getComponent and api.type and api.type.ComponentType then
+        local CT_SIGNAL = api.type.ComponentType.SIGNAL
+        if CT_SIGNAL then
+            -- Wir scannen blitzschnell alle typischen TPF2 IDs. 
+            -- Das dauert in Lua nur wenige Millisekunden und umgeht alle Engine-Sperren.
+            for i = 1, 150000 do
+                if safeCall(api.engine.getComponent, i, CT_SIGNAL) then
+                    addSignalId(i)
                 end
-            elseif type(v) == "table" then
-                scanSignalIds(v, depth + 1, ks, visited)
             end
         end
     end
 
-    -- 1) Direct enumeration (if available in this game state)
-    for _, sid in ipairs(getAllSignalIds()) do
-        addSignalId(sid)
-    end
-
-    -- 2) Fallback: derive signal IDs from transport network line/edge data
-    local tn = api and api.engine and api.engine.system and api.engine.system.transportNetwork
-    if tn and api and api.type and api.type.ComponentType and api.engine and api.engine.getComponent then
-        local CT = api.type.ComponentType
-
-        -- Seed candidates from common transport entities
-        for _, id in ipairs(getAllLineIds()) do addCandidate(id) end
-        for _, id in ipairs(getAllStationIds()) do addCandidate(id) end
-        for _, id in ipairs(getAllVehicleIds()) do addCandidate(id) end
-
-        -- Add stop IDs from lines (often terminal entities)
-        for _, lid in ipairs(getAllLineIds()) do
-            local lEnt = getLine(lid)
-            local rawStops = lEnt and (lEnt.stops or lEnt.waypoints) or {}
-            if type(rawStops) == "table" then
-                for _, s in ipairs(rawStops) do addCandidate(s) end
-            end
-        end
-
-        -- 2a) Try direct transport-network signal methods if present
-        for _, fnName in ipairs({"getSignals", "getSignalList", "getAllSignals", "getSignalIds"}) do
-            local fn = tn[fnName]
-            if type(fn) == "function" then
-                local list = safeCall(fn)
-                if type(list) == "table" then
-                    for _, entry in ipairs(list) do
-                        addSignalId(entry)
-                        if type(entry) == "table" then
-                            addSignalId(entry.id)
-                            addSignalId(entry.entity)
-                            addSignalId(entry.signal)
-                            scanSignalIds(entry, 0, "signal", {})
-                        end
-                    end
-                end
-            end
-        end
-
-        for _, lid in ipairs(getAllLineIds()) do
-            local ldata = safeCall(tn.getLine, lid)
-                      or safeCall(tn.getLineObject, lid)
-                      or safeCall(tn.getLineData, lid)
-            if type(ldata) == "table" then
-                scanSignalIds(ldata, 0, "line", {})
-
-                for _, key in ipairs({"edgeList", "edges", "edgeIds", "segments"}) do
-                    local edgeList = ldata[key]
-                    if type(edgeList) == "table" then
-                        for _, e in ipairs(edgeList) do
-                            local eid = toEntityId(e)
-                            if eid ~= 0 then
-                                addCandidate(eid)
-                                local edgeComp = safeCall(api.engine.getComponent, eid, CT.BASE_EDGE)
-                                              or (CT.BASE_EDGE_TRACK and safeCall(api.engine.getComponent, eid, CT.BASE_EDGE_TRACK))
-                                              or (CT.TRANSPORT_EDGE and safeCall(api.engine.getComponent, eid, CT.TRANSPORT_EDGE))
-                                if edgeComp then
-                                    scanSignalIds(edgeComp, 0, "edge", {})
-                                end
-
-                                -- Some builds expose signal links via TransportEdge data
-                                if CT.TransportEdge then
-                                    local te = safeCall(api.engine.getComponent, eid, CT.TransportEdge)
-                                    if te then scanSignalIds(te, 0, "edge", {}) end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        -- 2c) Probe signal-related component types on known candidates
-        local signalComponentTypes = {}
-        for k, v in pairs(CT) do
-            if type(k) == "string" and k:upper():find("SIGNAL") and type(v) == "number" then
-                signalComponentTypes[#signalComponentTypes + 1] = v
-            end
-        end
-
-        for entityId, _ in pairs(candidateEntityIds) do
-            for _, ctVal in ipairs(signalComponentTypes) do
-                local comp = safeCall(api.engine.getComponent, entityId, ctVal)
-                if comp then
-                    -- In some variants, signal entities expose a signal component directly.
-                    addSignalId(entityId)
-                    scanSignalIds(comp, 0, "signal", {})
-                end
-            end
-        end
-
-    end
-
+    -- Für jedes gefundene Signal die Koordinaten und den Zustand auslesen
     for sid, _ in pairs(seen) do
         local ent = getEntity(sid)
         local pos = {x=0, y=0, z=0}
@@ -1095,7 +991,7 @@ local function collectSignals()
                 state = safeInt(comp.state or comp.signalState or comp.mainState or comp.aspect or comp.value or 0)
             end
         end
-        -- Normalisiere beliebige Signalzustände auf 0/1 (0=Rot/Halt, 1=Gruen/Fahrt)
+        -- Normalisiere Signalzustände auf 0/1 (0=Rot/Halt, 1=Gruen/Fahrt)
         if state ~= 0 then state = state > 0 and 1 or 0 end
 
         signals[#signals+1] = {
