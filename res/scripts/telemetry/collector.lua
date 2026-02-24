@@ -34,7 +34,14 @@ end
 local function toEntityId(v)
     if type(v) == "number" then return safeInt(v) end
     if type(v) == "table" then
-        return safeInt(v.entity or v.id or v.entityId or v.entity_id or 0)
+        return safeInt(
+            v.entity or v.id or v.entityId or v.entity_id or
+            v.edge or v.edgeId or v.edge_id or
+            v.node or v.nodeId or v.node_id or
+            v.signal or v.signalId or v.signal_id or
+            v.station or v.stationId or v.station_id or
+            v.terminal or v.terminalId or v.terminal_id or 0
+        )
     end
     return 0
 end
@@ -42,6 +49,45 @@ end
 --- Gibt einen String oder "" zurueck
 local function safeStr(v)
     if type(v) == "string" then return v end
+    return ""
+end
+
+local function trimStr(s)
+    s = safeStr(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function isPlaceholderName(name)
+    local n = trimStr(name)
+    if n == "" then return true end
+    local low = n:lower()
+    if low:match("^stop%s*#%d+$") then return true end
+    if low:match("^station%s*#%d+$") then return true end
+    return false
+end
+
+local function deepFindName(val, depth, visited)
+    depth = depth or 0
+    visited = visited or {}
+    if depth > 4 then return "" end
+
+    local t = type(val)
+    if t == "string" then
+        return isPlaceholderName(val) and "" or trimStr(val)
+    end
+    if t ~= "table" then return "" end
+    if visited[val] then return "" end
+    visited[val] = true
+
+    for _, k in ipairs({"name", "displayName", "label", "stationName", "terminalName", "stopName", "title"}) do
+        local s = trimStr(val[k])
+        if s ~= "" and not isPlaceholderName(s) then return s end
+    end
+
+    for _, v in pairs(val) do
+        local n = deepFindName(v, depth + 1, visited)
+        if n ~= "" then return n end
+    end
     return ""
 end
 
@@ -403,6 +449,38 @@ end
 local _stationCache = {}
 local _terminalToStation = {} -- NEU: Mapping Terminal -> Station
 
+local function resolveEntityDisplayName(entityId, ent)
+    local id = safeInt(entityId)
+    local e = ent or getEntity(id)
+    if not e then return "" end
+
+    -- 1) direct fields
+    local direct = trimStr(e.name or e.displayName or e.label or e.stationName or e.terminalName)
+    if direct ~= "" and not isPlaceholderName(direct) then
+        return direct
+    end
+
+    -- 2) nested fields (many TPF2 objects keep runtime display names nested)
+    local deep = deepFindName(e, 0, {})
+    if deep ~= "" then return deep end
+
+    -- 3) linked station / group object
+    for _, k in ipairs({"station", "stationEntity", "stationEntityId", "stationGroup", "stationId", "group", "parent"}) do
+        local ref = e[k]
+        local sid = safeInt(ref)
+        if sid ~= 0 and sid ~= id then
+            local se = getEntity(sid)
+            local sn = resolveEntityDisplayName(sid, se)
+            if sn ~= "" then return sn end
+        elseif type(ref) == "table" then
+            local sn = deepFindName(ref, 0, {})
+            if sn ~= "" then return sn end
+        end
+    end
+
+    return ""
+end
+
 local function buildStationCache()
     _stationCache = {}
     _terminalToStation = {}
@@ -414,7 +492,7 @@ local function buildStationCache()
 
         local ent = getEntity(sid)
         if ent then
-            name = safeStr(ent.name or "")
+            name = resolveEntityDisplayName(sidInt, ent)
             -- Position: TPF2 liefert entweder .position oder .transform (4x4-Matrix)
             if ent.position then
                 pos = {
@@ -548,13 +626,15 @@ local function collectLines()
         return 0, rawId
     end
 
-    local function resolveStopDisplayName(stopId, stopObj)
+    local function resolveStopDisplayName(stopId, rawStopId, stopObj)
         if type(stopObj) == "table" then
-            local direct = safeStr(
+            local direct = trimStr(
                 stopObj.name or stopObj.stopName or stopObj.stationName or
                 stopObj.terminalName or stopObj.label or ""
             )
-            if direct ~= "" then return direct end
+            if direct ~= "" and not isPlaceholderName(direct) then return direct end
+            local deepObj = deepFindName(stopObj, 0, {})
+            if deepObj ~= "" then return deepObj end
         end
 
         local cached = _stationCache[safeInt(stopId)]
@@ -563,13 +643,13 @@ local function collectLines()
         end
 
         if stopId ~= 0 then
-            local ent = getEntity(stopId)
-            if ent then
-                local entName = safeStr(ent.name or ent.stationName or ent.terminalName or "")
-                if entName ~= "" then
-                    return entName
-                end
-            end
+            local entName = resolveEntityDisplayName(stopId)
+            if entName ~= "" then return entName end
+        end
+
+        if rawStopId ~= 0 then
+            local entName = resolveEntityDisplayName(rawStopId)
+            if entName ~= "" then return entName end
         end
 
         return ""
@@ -587,7 +667,7 @@ local function collectLines()
             for i, stop in ipairs(rawStops) do
                 local stopId, rawStopId = extractStationIdFromStop(stop)
 
-                local resolvedName = resolveStopDisplayName(stopId, stop)
+                local resolvedName = resolveStopDisplayName(stopId, rawStopId, stop)
                 local stopInfo = _stationCache[stopId]
                 stops[#stops+1] = {
                     index      = i,
@@ -857,9 +937,143 @@ end
 
 local function collectSignals()
     local signals = {}
-    local ids = getAllSignalIds()
+    local seen = {}
+    local candidateEntityIds = {}
 
-    for _, sid in ipairs(ids) do
+    local function addCandidate(id)
+        local n = toEntityId(id)
+        if n ~= 0 then candidateEntityIds[n] = true end
+    end
+
+    local function addSignalId(id)
+        local sid = toEntityId(id)
+        if sid ~= 0 then seen[sid] = true end
+    end
+
+    local function scanSignalIds(val, depth, keyHint, visited)
+        depth = depth or 0
+        visited = visited or {}
+        if depth > 7 then return end
+
+        local t = type(val)
+        if t == "number" then
+            if keyHint and keyHint:find("signal") then addSignalId(val) end
+            return
+        end
+        if t ~= "table" then return end
+        if visited[val] then return end
+        visited[val] = true
+
+        for k, v in pairs(val) do
+            local ks = tostring(k):lower()
+            if type(v) == "number" then
+                if ks:find("signal") then
+                    addSignalId(v)
+                end
+            elseif type(v) == "table" then
+                scanSignalIds(v, depth + 1, ks, visited)
+            end
+        end
+    end
+
+    -- 1) Direct enumeration (if available in this game state)
+    for _, sid in ipairs(getAllSignalIds()) do
+        addSignalId(sid)
+    end
+
+    -- 2) Fallback: derive signal IDs from transport network line/edge data
+    local tn = api and api.engine and api.engine.system and api.engine.system.transportNetwork
+    if tn and api and api.type and api.type.ComponentType and api.engine and api.engine.getComponent then
+        local CT = api.type.ComponentType
+
+        -- Seed candidates from common transport entities
+        for _, id in ipairs(getAllLineIds()) do addCandidate(id) end
+        for _, id in ipairs(getAllStationIds()) do addCandidate(id) end
+        for _, id in ipairs(getAllVehicleIds()) do addCandidate(id) end
+
+        -- Add stop IDs from lines (often terminal entities)
+        for _, lid in ipairs(getAllLineIds()) do
+            local lEnt = getLine(lid)
+            local rawStops = lEnt and (lEnt.stops or lEnt.waypoints) or {}
+            if type(rawStops) == "table" then
+                for _, s in ipairs(rawStops) do addCandidate(s) end
+            end
+        end
+
+        -- 2a) Try direct transport-network signal methods if present
+        for _, fnName in ipairs({"getSignals", "getSignalList", "getAllSignals", "getSignalIds"}) do
+            local fn = tn[fnName]
+            if type(fn) == "function" then
+                local list = safeCall(fn)
+                if type(list) == "table" then
+                    for _, entry in ipairs(list) do
+                        addSignalId(entry)
+                        if type(entry) == "table" then
+                            addSignalId(entry.id)
+                            addSignalId(entry.entity)
+                            addSignalId(entry.signal)
+                            scanSignalIds(entry, 0, "signal", {})
+                        end
+                    end
+                end
+            end
+        end
+
+        for _, lid in ipairs(getAllLineIds()) do
+            local ldata = safeCall(tn.getLine, lid)
+                      or safeCall(tn.getLineObject, lid)
+                      or safeCall(tn.getLineData, lid)
+            if type(ldata) == "table" then
+                scanSignalIds(ldata, 0, "line", {})
+
+                for _, key in ipairs({"edgeList", "edges", "edgeIds", "segments"}) do
+                    local edgeList = ldata[key]
+                    if type(edgeList) == "table" then
+                        for _, e in ipairs(edgeList) do
+                            local eid = toEntityId(e)
+                            if eid ~= 0 then
+                                addCandidate(eid)
+                                local edgeComp = safeCall(api.engine.getComponent, eid, CT.BASE_EDGE)
+                                              or (CT.BASE_EDGE_TRACK and safeCall(api.engine.getComponent, eid, CT.BASE_EDGE_TRACK))
+                                              or (CT.TRANSPORT_EDGE and safeCall(api.engine.getComponent, eid, CT.TRANSPORT_EDGE))
+                                if edgeComp then
+                                    scanSignalIds(edgeComp, 0, "edge", {})
+                                end
+
+                                -- Some builds expose signal links via TransportEdge data
+                                if CT.TransportEdge then
+                                    local te = safeCall(api.engine.getComponent, eid, CT.TransportEdge)
+                                    if te then scanSignalIds(te, 0, "edge", {}) end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        -- 2c) Probe signal-related component types on known candidates
+        local signalComponentTypes = {}
+        for k, v in pairs(CT) do
+            if type(k) == "string" and k:upper():find("SIGNAL") and type(v) == "number" then
+                signalComponentTypes[#signalComponentTypes + 1] = v
+            end
+        end
+
+        for entityId, _ in pairs(candidateEntityIds) do
+            for _, ctVal in ipairs(signalComponentTypes) do
+                local comp = safeCall(api.engine.getComponent, entityId, ctVal)
+                if comp then
+                    -- In some variants, signal entities expose a signal component directly.
+                    addSignalId(entityId)
+                    scanSignalIds(comp, 0, "signal", {})
+                end
+            end
+        end
+
+    end
+
+    for sid, _ in pairs(seen) do
         local ent = getEntity(sid)
         local pos = {x=0, y=0, z=0}
         if ent then
@@ -890,6 +1104,7 @@ local function collectSignals()
             state = state,
         }
     end
+
     return signals
 end
 

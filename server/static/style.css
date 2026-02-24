@@ -117,7 +117,10 @@ html:not(.dark) .view-tab.active { background: #1d4ed8; color: #fff; }
   height: 100%;
   display: block;
   background: #1e1e1e;
+  cursor: grab;
+  touch-action: none;
 }
+#telemetryMap.dragging { cursor: grabbing; }
 
 /* ── Speed cells ────────────────────────────────────────────────────── */
 .speed-cell   { font-variant-numeric:tabular-nums; font-weight:600; font-size:.8rem; white-space:nowrap; }

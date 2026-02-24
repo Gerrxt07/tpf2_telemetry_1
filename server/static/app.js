@@ -231,6 +231,17 @@ let _stopNameById  = new Map(); // covers both station_id and raw_stop_id from l
 let _columnFilters = { name:"", type:"", line_name:"", state:"", last_stop_name:"", next_stop_name:"" };
 let _activeView    = "list";
 let _lastMapData   = null;
+const MAP_ZOOM_MIN = 0.5;
+const MAP_ZOOM_MAX = 8;
+let _mapViewState  = {
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  dragging: false,
+  pointerId: null,
+  lastX: 0,
+  lastY: 0,
+};
 
 // WS connection state (read by tpf2HandleHtmx to avoid double-processing)
 window.tpf2WsConnected = false;
@@ -332,6 +343,223 @@ function normalizePoint(pt) {
   return null;
 }
 
+function getMapStopNameOverrides(data) {
+  const names = new Map();
+  const addName = (id, name) => {
+    const n = String(name || "").trim();
+    const nid = Number(id || 0);
+    if (!nid || !n || isPlaceholderName(n)) return;
+    names.set(nid, n);
+  };
+
+  for (const l of data.lines || []) {
+    for (const s of l.stops || []) {
+      addName(s.station_id, s.name);
+      addName(s.raw_stop_id, s.name);
+    }
+  }
+  for (const v of data.vehicles || []) {
+    addName(v.last_stop_id, v.last_stop_name);
+    addName(v.next_stop_id, v.next_stop_name);
+  }
+
+  // Fallback for cases where line stops only expose raw stop ids that do not
+  // equal station ids: infer station name by matching stop index to line-path
+  // point and assigning the nearest station at that world position.
+  const pathByLineId = new Map();
+  for (const p of data.paths || []) pathByLineId.set(Number(p.line_id || 0), p);
+
+  const stations = data.stations || [];
+  const nearestStationId = (pt) => {
+    const src = normalizePoint(pt);
+    if (!src) return 0;
+    let bestId = 0;
+    let bestD2 = Infinity;
+    for (const st of stations) {
+      const sp = normalizePoint(st.pos);
+      if (!sp) continue;
+      const dx = sp.x - src.x;
+      const dy = sp.y - src.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        bestId = Number(st.id || 0);
+      }
+    }
+    // world-space threshold (meters-ish) to avoid wrong remaps
+    return bestD2 <= 200 * 200 ? bestId : 0;
+  };
+
+  for (const line of data.lines || []) {
+    const path = pathByLineId.get(Number(line.id || 0));
+    if (!path || !Array.isArray(path.points)) continue;
+    const stops = line.stops || [];
+    for (let i = 0; i < stops.length && i < path.points.length; i++) {
+      const stop = stops[i] || {};
+      const stopName = String(stop.name || "").trim();
+      if (!stopName || isPlaceholderName(stopName)) continue;
+
+      const sid = nearestStationId(path.points[i]);
+      if (!sid) continue;
+
+      // Prefer explicit station-id mapping if available; otherwise nearest map
+      // match upgrades stale station labels after in-game renames.
+      if (!names.has(sid) || names.get(sid) !== stopName) names.set(sid, stopName);
+    }
+  }
+
+  return names;
+}
+
+function nearestPointOnSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const denom = dx * dx + dy * dy;
+  if (denom <= 1e-8) {
+    const ddx = px - ax;
+    const ddy = py - ay;
+    return { x: ax, y: ay, d2: ddx * ddx + ddy * ddy };
+  }
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / denom));
+  const x = ax + t * dx;
+  const y = ay + t * dy;
+  const ddx = px - x;
+  const ddy = py - y;
+  return { x, y, d2: ddx * ddx + ddy * ddy };
+}
+
+function snapPointToPolyline(pt, polyline) {
+  if (!pt || !Array.isArray(polyline) || polyline.length < 2) return null;
+  let best = null;
+  for (let i = 1; i < polyline.length; i++) {
+    const a = polyline[i - 1];
+    const b = polyline[i];
+    const cand = nearestPointOnSegment(pt.x, pt.y, a.x, a.y, b.x, b.y);
+    if (!best || cand.d2 < best.d2) best = cand;
+  }
+  return best;
+}
+
+function clusterByDistance(items, thresholdPx) {
+  const clusters = [];
+  for (const item of items) {
+    let best = null;
+    let bestD2 = Infinity;
+    for (const c of clusters) {
+      const dx = item.x - c.cx;
+      const dy = item.y - c.cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= thresholdPx * thresholdPx && d2 < bestD2) {
+        best = c;
+        bestD2 = d2;
+      }
+    }
+    if (!best) {
+      clusters.push({ items: [item], cx: item.x, cy: item.y });
+    } else {
+      best.items.push(item);
+      const n = best.items.length;
+      best.cx = ((best.cx * (n - 1)) + item.x) / n;
+      best.cy = ((best.cy * (n - 1)) + item.y) / n;
+    }
+  }
+  return clusters;
+}
+
+function resolveStationRenderItems(data, project, stopNameOverrides) {
+  const raw = [];
+  for (const st of data.stations || []) {
+    const p = project(st.pos);
+    if (!p) continue;
+    const sid = Number(st.id || 0);
+    const override = stopNameOverrides.get(sid);
+    raw.push({
+      x: p.x,
+      y: p.y,
+      id: sid,
+      baseLabel: String(st.name || "").trim(),
+      label: String(override || st.name || "").trim(),
+      hasOverride: Boolean(override),
+    });
+  }
+
+  const clusters = clusterByDistance(raw, 12);
+  const resolved = [];
+  for (const c of clusters) {
+    const labelScore = new Map();
+    for (const it of c.items) {
+      const lbl = it.label || it.baseLabel;
+      if (!lbl) continue;
+      const base = labelScore.get(lbl) || 0;
+      labelScore.set(lbl, base + (it.hasOverride ? 100 : 1));
+    }
+    let bestLabel = "";
+    let bestScore = -Infinity;
+    for (const [lbl, score] of labelScore.entries()) {
+      if (score > bestScore) {
+        bestScore = score;
+        bestLabel = lbl;
+      }
+    }
+
+    resolved.push({
+      x: c.cx,
+      y: c.cy,
+      label: bestLabel,
+      count: c.items.length,
+    });
+  }
+  return resolved;
+}
+
+function spreadVehicleMarkers(markers) {
+  if (!markers.length) return { markers, clusters: [] };
+  const clusters = clusterByDistance(markers, 10);
+  for (const c of clusters) {
+    if (c.items.length <= 1) {
+      c.items[0].drawX = c.items[0].x;
+      c.items[0].drawY = c.items[0].y;
+      continue;
+    }
+
+    const radius = 8 + Math.min(14, c.items.length * 1.5);
+    const ordered = [...c.items].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    for (let i = 0; i < ordered.length; i++) {
+      const a = (Math.PI * 2 * i) / ordered.length;
+      ordered[i].drawX = c.cx + Math.cos(a) * radius;
+      ordered[i].drawY = c.cy + Math.sin(a) * radius;
+    }
+  }
+  return { markers, clusters };
+}
+
+function buildInferredSignals(data) {
+  const keyOf = (p) => `${Math.round(p.x)}:${Math.round(p.y)}`;
+  const points = new Map();
+
+  for (const path of data.paths || []) {
+    const seenInPath = new Set();
+    for (const pt of path.points || []) {
+      const p = normalizePoint(pt);
+      if (!p) continue;
+      const k = keyOf(p);
+      if (seenInPath.has(k)) continue;
+      seenInPath.add(k);
+      const row = points.get(k) || { x: p.x, y: p.y, n: 0 };
+      row.n += 1;
+      points.set(k, row);
+    }
+  }
+
+  const inferred = [];
+  for (const row of points.values()) {
+    if (row.n >= 3) {
+      inferred.push({ id: -inferred.length - 1, pos: { x: row.x, y: row.y, z: 0 }, state: null, inferred: true });
+    }
+  }
+  return inferred;
+}
+
 function computeBounds(data) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const consider = (pt) => {
@@ -402,16 +630,27 @@ function drawMap(data) {
   const project = (pt) => {
     const p = normalizePoint(pt);
     if (!p) return null;
+    const baseX = offX + (p.x - bounds.minX) * scale;
+    const baseY = height - (offY + (p.y - bounds.minY) * scale);
     return {
-      x: offX + (p.x - bounds.minX) * scale,
-      y: height - (offY + (p.y - bounds.minY) * scale),
+      x: baseX * _mapViewState.zoom + _mapViewState.panX,
+      y: baseY * _mapViewState.zoom + _mapViewState.panY,
     };
   };
+
+  const lineWorldPaths = new Map();
 
   // Paths first
   mapCtx.lineWidth   = 2;
   mapCtx.strokeStyle = "#444444";
   for (const path of data.paths || []) {
+    const worldPts = [];
+    for (const p of path.points || []) {
+      const wp = normalizePoint(p);
+      if (wp) worldPts.push(wp);
+    }
+    if (worldPts.length > 1) lineWorldPaths.set(Number(path.line_id || 0), worldPts);
+
     const pts = [];
     for (const p of path.points || []) {
       const pr = project(p);
@@ -425,47 +664,175 @@ function drawMap(data) {
     }
   }
 
+  const signalsToDraw = (data.signals && data.signals.length > 0)
+    ? data.signals
+    : buildInferredSignals(data);
+
   // Signals
-  for (const s of data.signals || []) {
+  for (const s of signalsToDraw) {
     const pr = project(s.pos);
     if (!pr) continue;
     mapCtx.beginPath();
-    // Signalzustand: 1 = Fahrt/Grün, sonst Halt/Rot
-    mapCtx.fillStyle = Number(s.state) === 1 ? "#00ff00" : "#ff0000";
-    mapCtx.arc(pr.x, pr.y, 2, 0, Math.PI * 2);
+    // Signalzustand: 1 = Fahrt/Grün, 0 = Halt/Rot, null = inferred/unknown
+    mapCtx.fillStyle = s.state == null ? "#f59e0b" : (Number(s.state) === 1 ? "#00ff00" : "#ff0000");
+    mapCtx.arc(pr.x, pr.y, 3, 0, Math.PI * 2);
     mapCtx.fill();
+    mapCtx.beginPath();
+    mapCtx.strokeStyle = "#111827";
+    mapCtx.lineWidth = 1;
+    mapCtx.arc(pr.x, pr.y, 4.5, 0, Math.PI * 2);
+    mapCtx.stroke();
   }
 
-  // Stations
+  const stopNameOverrides = getMapStopNameOverrides(data);
+
+  // Stations (clustered to avoid duplicate labels at the same location)
+  const stationRenderItems = resolveStationRenderItems(data, project, stopNameOverrides);
   mapCtx.font = "10px 'Inter', system-ui, sans-serif";
   mapCtx.textBaseline = "middle";
-  for (const st of data.stations || []) {
-    const pr = project(st.pos);
-    if (!pr) continue;
+  for (const st of stationRenderItems) {
     mapCtx.fillStyle = "#d1d5db";
-    mapCtx.fillRect(pr.x - 3, pr.y - 3, 6, 6);
-    if (st.name) {
+    mapCtx.fillRect(st.x - 3, st.y - 3, 6, 6);
+    if (st.label) {
       mapCtx.fillStyle = "#ffffff";
-      mapCtx.fillText(st.name, pr.x + 6, pr.y);
+      mapCtx.fillText(st.label, st.x + 6, st.y);
+      if (st.count > 1) {
+        mapCtx.fillStyle = "#9ca3af";
+        mapCtx.fillText(`(${st.count})`, st.x + 6 + (st.label.length * 6.2), st.y);
+      }
     }
   }
 
-  // Vehicles last
-  mapCtx.font = "12px 'Inter', system-ui, sans-serif";
+  // Vehicles last (spread overlapping markers for crowded stations)
+  const vehicleMarkers = [];
   for (const v of data.vehicles || []) {
-    const pr = project(v.position);
+    let worldPos = normalizePoint(v.position);
+    if (!worldPos) continue;
+    const lineId = Number(v.line_id || 0);
+    const poly = lineWorldPaths.get(lineId);
+    if (poly && poly.length > 1) {
+      const snapped = snapPointToPolyline(worldPos, poly);
+      if (snapped) worldPos = { x: snapped.x, y: snapped.y };
+    }
+
+    const pr = project(worldPos);
     if (!pr) continue;
-    const type  = getVehicleType(v);
-    const color = type === "RAIL" ? "#ff6666" : type === "ROAD" ? "#3b82f6" : "#ffffff";
+
+    vehicleMarkers.push({
+      id: v.id,
+      name: v.name,
+      type: getVehicleType(v),
+      x: pr.x,
+      y: pr.y,
+      drawX: pr.x,
+      drawY: pr.y,
+    });
+  }
+
+  const spread = spreadVehicleMarkers(vehicleMarkers);
+
+  mapCtx.font = "12px 'Inter', system-ui, sans-serif";
+  for (const v of spread.markers) {
+    const color = v.type === "RAIL" ? "#ff6666" : v.type === "ROAD" ? "#3b82f6" : "#ffffff";
     mapCtx.beginPath();
     mapCtx.fillStyle = color;
-    mapCtx.arc(pr.x, pr.y, 4, 0, Math.PI * 2);
+    mapCtx.arc(v.drawX, v.drawY, 4, 0, Math.PI * 2);
     mapCtx.fill();
     if (v.name) {
       mapCtx.fillStyle = "#ffffff";
-      mapCtx.fillText(v.name, pr.x + 6, pr.y);
+      mapCtx.fillText(v.name, v.drawX + 6, v.drawY);
     }
   }
+
+  // Cluster count hint for overlapping trains
+  mapCtx.font = "10px 'Inter', system-ui, sans-serif";
+  for (const c of spread.clusters) {
+    if (c.items.length <= 1) continue;
+    mapCtx.fillStyle = "rgba(17,24,39,0.85)";
+    mapCtx.beginPath();
+    mapCtx.arc(c.cx, c.cy, 7, 0, Math.PI * 2);
+    mapCtx.fill();
+    mapCtx.fillStyle = "#ffffff";
+    mapCtx.textAlign = "center";
+    mapCtx.textBaseline = "middle";
+    mapCtx.fillText(String(c.items.length), c.cx, c.cy + 0.5);
+  }
+  mapCtx.textAlign = "start";
+  mapCtx.textBaseline = "middle";
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function resetMapView() {
+  _mapViewState.zoom = 1;
+  _mapViewState.panX = 0;
+  _mapViewState.panY = 0;
+  if (_activeView === "map") drawMap(_lastMapData || _state);
+}
+
+function setMapDragging(dragging) {
+  _mapViewState.dragging = dragging;
+  mapCanvas?.classList.toggle("dragging", dragging);
+}
+
+if (mapCanvas) {
+  mapCanvas.addEventListener("wheel", (e) => {
+    if (_activeView !== "map") return;
+    e.preventDefault();
+    const rect = mapCanvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+
+    const zoomFactor = e.deltaY < 0 ? 1.12 : 0.9;
+    const nextZoom = clamp(_mapViewState.zoom * zoomFactor, MAP_ZOOM_MIN, MAP_ZOOM_MAX);
+    if (nextZoom === _mapViewState.zoom) return;
+
+    const logicalX = (cx - _mapViewState.panX) / _mapViewState.zoom;
+    const logicalY = (cy - _mapViewState.panY) / _mapViewState.zoom;
+
+    _mapViewState.zoom = nextZoom;
+    _mapViewState.panX = cx - logicalX * nextZoom;
+    _mapViewState.panY = cy - logicalY * nextZoom;
+
+    drawMap(_lastMapData || _state);
+  }, { passive: false });
+
+  mapCanvas.addEventListener("pointerdown", (e) => {
+    if (_activeView !== "map") return;
+    if (e.button !== 0 && e.pointerType !== "touch") return;
+    _mapViewState.pointerId = e.pointerId;
+    _mapViewState.lastX = e.clientX;
+    _mapViewState.lastY = e.clientY;
+    setMapDragging(true);
+    mapCanvas.setPointerCapture(e.pointerId);
+  });
+
+  mapCanvas.addEventListener("pointermove", (e) => {
+    if (_activeView !== "map" || !_mapViewState.dragging) return;
+    if (_mapViewState.pointerId != null && e.pointerId !== _mapViewState.pointerId) return;
+
+    const dx = e.clientX - _mapViewState.lastX;
+    const dy = e.clientY - _mapViewState.lastY;
+    _mapViewState.lastX = e.clientX;
+    _mapViewState.lastY = e.clientY;
+    _mapViewState.panX += dx;
+    _mapViewState.panY += dy;
+
+    drawMap(_lastMapData || _state);
+  });
+
+  const endDrag = (e) => {
+    if (_mapViewState.pointerId != null && e.pointerId != null && e.pointerId !== _mapViewState.pointerId) return;
+    setMapDragging(false);
+    _mapViewState.pointerId = null;
+  };
+
+  mapCanvas.addEventListener("pointerup", endDrag);
+  mapCanvas.addEventListener("pointercancel", endDrag);
+  mapCanvas.addEventListener("lostpointercapture", endDrag);
+  mapCanvas.addEventListener("dblclick", () => resetMapView());
 }
 
 function setView(view) {
