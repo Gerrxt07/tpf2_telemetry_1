@@ -220,7 +220,7 @@ const WS_URL             = `ws://${location.host}/ws`;
 const RECONNECT_DELAY_MS = 3000;
 
 // ─── State ────────────────────────────────────────────────────────────────────
-let _state = { vehicles: [], lines: [], stations: [], stats: {}, game_time: null, timestamp: null, paths: [], signals: [] };
+let _state = { vehicles: [], lines: [], stations: [], stats: {}, game_time: null, timestamp: null, paths: [], signals: [], tracks: [] };
 let _selectedVid   = null;
 let _ws            = null;
 let _reconnecting  = false;
@@ -632,6 +632,7 @@ function computeBounds(data) {
   (data.vehicles || []).forEach(v => consider(v.position));
   (data.signals  || []).forEach(s => consider(s.pos));
   (data.paths    || []).forEach(p => (p.points || []).forEach(consider));
+  (data.tracks   || []).forEach(t => (t.points || []).forEach(consider));
 
   if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) return null;
 
@@ -713,9 +714,25 @@ function drawMap(data) {
     };
   };
 
+  // ── Track edges (real rail geometry) ──────────────────────────
+  const trackEdges = data.tracks || [];
+  if (trackEdges.length > 0) {
+    for (const edge of trackEdges) {
+      const pts = (edge.points || []).map(project).filter(Boolean);
+      if (pts.length < 2) continue;
+      mapCtx.beginPath();
+      mapCtx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) mapCtx.lineTo(pts[i].x, pts[i].y);
+      const isRail = (edge.type === "RAIL");
+      mapCtx.strokeStyle = isRail ? "rgba(148,163,184,0.35)" : "rgba(234,179,8,0.25)";
+      mapCtx.lineWidth   = isRail ? 1.5 : 1;
+      mapCtx.stroke();
+    }
+  }
+
   const lineWorldPaths = new Map();
 
-  // Paths first
+  // Paths (line routes – station-to-station)
   mapCtx.lineWidth   = 2;
   mapCtx.strokeStyle = "#444444";
   for (const path of data.paths || []) {
